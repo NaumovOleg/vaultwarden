@@ -24,6 +24,26 @@ function appFunction(t: Template): any {
   return match;
 }
 
+// Docker build args are not part of the CloudFormation template's Properties
+// — they only appear in a resource's Metadata, and only once the CDK app
+// opts in via the 'aws:cdk:enable-asset-metadata' context key (this is what
+// `cdk synth` does by default; a bare `new cdk.App()` does not). This helper
+// exists only to prove imageTag actually reaches the Docker build; the other
+// tests in this file use the plain `synth()` above.
+function synthWithImageTag(imageTag: string): Template {
+  const app = new cdk.App({ context: { 'aws:cdk:enable-asset-metadata': true } });
+  const stack = new cdk.Stack(app, 'S', { env: { account: '111111111111', region: 'eu-west-1' } });
+  const storage = new Storage(stack, 'Storage');
+  new Application(stack, 'App', {
+    vpc: storage.vpc,
+    fileSystem: storage.fileSystem,
+    accessPoint: storage.accessPoint,
+    domain: 'https://example.cloudfront.net',
+    imageTag,
+  });
+  return Template.fromStack(stack);
+}
+
 describe('Application function', () => {
   it('runs on arm64 for cheaper GB-seconds', () => {
     expect(appFunction(synth()).Properties.Architectures).toEqual(['arm64']);
@@ -72,12 +92,40 @@ describe('Application function', () => {
     });
   });
 
-  it('grants the function no permissions beyond EFS and logs', () => {
+  it('grants the function role exactly EFS client-mount and client-write, scoped to this access point and filesystem', () => {
     const policies = synth().findResources('AWS::IAM::Policy');
-    const text = JSON.stringify(policies);
-    expect(text).not.toContain('secretsmanager:');
-    expect(text).not.toContain('ssm:');
-    expect(text).not.toContain('s3:PutObject');
+    const statements = Object.values(policies).flatMap(
+      (p: any) => p.Properties.PolicyDocument.Statement,
+    );
+
+    // Positive allow-list, not a denylist: any action added beyond these two
+    // EFS actions — s3:GetObject, dynamodb:*, iam:PassRole, anything —
+    // fails this test, not just the handful of substrings a denylist
+    // happens to name. (CloudWatch Logs access is granted separately via
+    // the AWSLambdaBasicExecutionRole managed policy on the role, not via
+    // this custom inline policy, so it is out of scope here.)
+    expect(statements.map((s: any) => s.Action).sort()).toEqual([
+      'elasticfilesystem:ClientMount',
+      'elasticfilesystem:ClientWrite',
+    ]);
+    expect(statements.every((s: any) => s.Effect === 'Allow')).toBe(true);
+
+    // ClientMount is conditioned on this construct's own access point, not
+    // granted against a blanket Resource: '*'.
+    const mount = statements.find((s: any) => s.Action === 'elasticfilesystem:ClientMount');
+    expect(mount.Resource).toBe('*');
+    expect(Object.keys(mount.Condition.StringEquals)).toEqual(['elasticfilesystem:AccessPointArn']);
+
+    // ClientWrite is resourced to this construct's own filesystem ARN, not '*'.
+    const write = statements.find((s: any) => s.Action === 'elasticfilesystem:ClientWrite');
+    expect(write.Resource).not.toBe('*');
+  });
+
+  it('wires imageTag through to the Docker build so an upgrade actually changes the deployed image', () => {
+    const t = synthWithImageTag('9.9.9-test-tag');
+    expect(appFunction(t).Metadata['aws:asset:docker-build-args']).toEqual({
+      VW_TAG: '9.9.9-test-tag',
+    });
   });
 });
 

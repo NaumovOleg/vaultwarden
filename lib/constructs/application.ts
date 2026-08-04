@@ -38,7 +38,13 @@ export class Application extends Construct {
       functionName: 'vaultwarden',
       code: lambda.DockerImageCode.fromImageAsset(
         path.join(__dirname, '..', '..', 'docker', 'vaultwarden'),
-        { platform: ecrAssets.Platform.LINUX_ARM64 },
+        {
+          platform: ecrAssets.Platform.LINUX_ARM64,
+          // Threads props.imageTag into the Dockerfile's VW_TAG build arg, so
+          // an upgrade is actually a context-value change and redeploy, not
+          // just a prop nobody reads.
+          buildArgs: { VW_TAG: props.imageTag },
+        },
       ),
       architecture: lambda.Architecture.ARM_64,
       memorySize: 1024,
