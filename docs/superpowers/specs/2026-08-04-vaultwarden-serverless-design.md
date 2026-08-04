@@ -21,13 +21,13 @@ Cost target: $0.00/month during the first 12 months, under $0.20/month afterward
 
 ## 2. Prior art evaluated
 
-| Project | IaC | Status | Verdict |
-|---|---|---|---|
-| [darioackermann/vaultwarden-serverless](https://github.com/darioackermann/vaultwarden-serverless) | Terraform | Last push Sep 2023 | Ideas only. Patches Vaultwarden sources with the `lambda-web` crate, pinning it to a 2023 build. Attaches an Elastic IP to the Lambda ENI, which is unsupported. No concurrency cap, so its documented random SQLite lock failures are self-inflicted. |
-| [vvondra/bitwarden-serverless](https://github.com/vvondra/bitwarden-serverless) | Serverless Framework | Archived Jun 2022 | Rejected. Not Vaultwarden — an independent Node.js reimplementation of the Bitwarden API on DynamoDB, abandoned since 2020, schema validation still a TODO. |
-| [richardneililagan/vaultwarden-ecs-fargate](https://github.com/richardneililagan/vaultwarden-ecs-fargate) | CDK | Partially maintained | Rejected on cost. Fargate is roughly $10/month. |
-| [PR #5591 — RFC: AWS Serverless](https://github.com/dani-garcia/vaultwarden/pull/5591) | CDK assets | Draft, unmerged | Rejected. Aurora DSQL + S3 + SES behind an `aws` feature flag. Requires maintaining a fork of an unmerged branch; DSQL lacks foreign keys and multi-statement DDL, which threatens future Vaultwarden migrations. |
-| [PR #5626 — OpenDAL file abstraction](https://github.com/dani-garcia/vaultwarden/pull/5626) | — | **Merged 2025-05-29**, shipped in 1.35.0 | Available but not used. See §3. |
+| Project                                                                                                   | IaC                  | Status                                   | Verdict                                                                                                                                                                                                                                                |
+| --------------------------------------------------------------------------------------------------------- | -------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [darioackermann/vaultwarden-serverless](https://github.com/darioackermann/vaultwarden-serverless)         | Terraform            | Last push Sep 2023                       | Ideas only. Patches Vaultwarden sources with the `lambda-web` crate, pinning it to a 2023 build. Attaches an Elastic IP to the Lambda ENI, which is unsupported. No concurrency cap, so its documented random SQLite lock failures are self-inflicted. |
+| [vvondra/bitwarden-serverless](https://github.com/vvondra/bitwarden-serverless)                           | Serverless Framework | Archived Jun 2022                        | Rejected. Not Vaultwarden — an independent Node.js reimplementation of the Bitwarden API on DynamoDB, abandoned since 2020, schema validation still a TODO.                                                                                            |
+| [richardneililagan/vaultwarden-ecs-fargate](https://github.com/richardneililagan/vaultwarden-ecs-fargate) | CDK                  | Partially maintained                     | Rejected on cost. Fargate is roughly $10/month.                                                                                                                                                                                                        |
+| [PR #5591 — RFC: AWS Serverless](https://github.com/dani-garcia/vaultwarden/pull/5591)                    | CDK assets           | Draft, unmerged                          | Rejected. Aurora DSQL + S3 + SES behind an `aws` feature flag. Requires maintaining a fork of an unmerged branch; DSQL lacks foreign keys and multi-statement DDL, which threatens future Vaultwarden migrations.                                      |
+| [PR #5626 — OpenDAL file abstraction](https://github.com/dani-garcia/vaultwarden/pull/5626)               | —                    | **Merged 2025-05-29**, shipped in 1.35.0 | Available but not used. See §3.                                                                                                                                                                                                                        |
 
 No existing CDK + Lambda + EFS implementation exists. This design is new.
 
@@ -63,8 +63,8 @@ CloudFront distribution                    public entry point, TLS, $0
 Lambda Function URL (authType: AWS_IAM)    unsigned requests → 403
    │
    ▼
-Lambda: Vaultwarden container              arm64, reservedConcurrency = 1
-   │   arm64, in VPC, no NAT
+Lambda: Vaultwarden container              arm64, reservedConcurrency = 10
+   │   in VPC, no NAT, no outbound internet
    ▼
 EFS One Zone (Bursting)                    SQLite database + all data
    ▲
@@ -95,14 +95,14 @@ is not a consideration.
 
 `efs.FileSystem`:
 
-| Setting | Value | Reason |
-|---|---|---|
-| `oneZone` | `true` | $0.16/GB-month instead of $0.30 |
-| `throughputMode` | `BURSTING` | No per-GB charge. `ELASTIC` would bill $0.03/GB read and $0.06/GB write |
-| `lifecyclePolicy` | not set | Infrequent Access is cheaper per GB but bills per access; at ~50 MB the saving is zero and the risk is not |
-| `performanceMode` | `GENERAL_PURPOSE` | Lowest latency |
-| `encrypted` | `true` | Free |
-| `removalPolicy` | `RETAIN` | **Mandatory.** Without it `cdk destroy` deletes the vault |
+| Setting           | Value             | Reason                                                                                                     |
+| ----------------- | ----------------- | ---------------------------------------------------------------------------------------------------------- |
+| `oneZone`         | `true`            | $0.16/GB-month instead of $0.30                                                                            |
+| `throughputMode`  | `BURSTING`        | No per-GB charge. `ELASTIC` would bill $0.03/GB read and $0.06/GB write                                    |
+| `lifecyclePolicy` | not set           | Infrequent Access is cheaper per GB but bills per access; at ~50 MB the saving is zero and the risk is not |
+| `performanceMode` | `GENERAL_PURPOSE` | Lowest latency                                                                                             |
+| `encrypted`       | `true`            | Free                                                                                                       |
+| `removalPolicy`   | `RETAIN`          | **Mandatory.** Without it `cdk destroy` deletes the vault                                                  |
 
 `efs.AccessPoint`: path `/vaultwarden`, POSIX uid/gid 1000, `createAcl` 0755.
 
@@ -130,15 +130,15 @@ arm64.
 
 `ROCKET_PORT` must be overridden: the official image defaults it to 80.
 
-| Setting | Value | Reason |
-|---|---|---|
-| `architecture` | `ARM_64` | 20% cheaper per GB-second, faster cold start |
-| base image | `-alpine` | ~120 MB vs ~250 MB, halves ECR storage cost |
-| `memorySize` | 1024 MB | More memory buys more vCPU, shortening cold start. Usage stays far inside the free tier |
-| `timeout` | 30 s | Matches CloudFront's default origin response timeout |
-| `reservedConcurrentExecutions` | **10** | Caps worst-case spend. See below for why not 1 |
-| log group retention | 1 week | Keeps CloudWatch inside the perpetual 5 GB free tier. Use an explicit `logs.LogGroup`; the `logRetention` prop is deprecated |
-| filesystem | EFS access point at `/mnt/data` | |
+| Setting                        | Value                           | Reason                                                                                                                       |
+| ------------------------------ | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `architecture`                 | `ARM_64`                        | 20% cheaper per GB-second, faster cold start                                                                                 |
+| base image                     | `-alpine`                       | ~120 MB vs ~250 MB, halves ECR storage cost                                                                                  |
+| `memorySize`                   | 1024 MB                         | More memory buys more vCPU, shortening cold start. Usage stays far inside the free tier                                      |
+| `timeout`                      | 30 s                            | Matches CloudFront's default origin response timeout                                                                         |
+| `reservedConcurrentExecutions` | **10**                          | Caps worst-case spend. See below for why not 1                                                                               |
+| log group retention            | 1 week                          | Keeps CloudWatch inside the perpetual 5 GB free tier. Use an explicit `logs.LogGroup`; the `logRetention` prop is deprecated |
+| filesystem                     | EFS access point at `/mnt/data` |                                                                                                                              |
 
 **Why concurrency is 10 and not 1.** A limit of 1 would serialise database
 access, but synchronous invocations above a reserved concurrency limit are not
@@ -163,22 +163,22 @@ credentials grant access to nothing beyond the filesystem it already serves.
 
 ### 3.4 Environment variables
 
-| Variable | Value | Purpose |
-|---|---|---|
-| `DATA_FOLDER` | `/mnt/data` | EFS mount |
-| `DATABASE_URL` | `/mnt/data/db.sqlite3` | SQLite file |
-| `ENABLE_DB_WAL` | **`false`** | **Mandatory — deployment blocker without it.** Vaultwarden enables WAL at startup by default. SQLite's WAL mode coordinates readers through a shared-memory file mapped with `mmap`, which network filesystems do not provide, so on EFS the process aborts with `Failed to turn on WAL` and never serves a request. It must be present from the very first boot: a single startup without it writes WAL mode into the database file |
-| `DOMAIN` | CloudFront URL (see §7) | Absolute URL generation |
-| `SIGNUPS_ALLOWED` | `false` | Set after the owner account exists |
-| `INVITATIONS_ALLOWED` | `false` | Single user |
-| `ADMIN_TOKEN` | **unset** | Disables `/admin` entirely — see §6 |
-| `DISABLE_ICON_DOWNLOAD` | `true` | No outbound internet |
-| `WEBSOCKET_ENABLED` | `false` | Function URL cannot carry WebSocket |
-| `IP_HEADER` | `X-Forwarded-For` | **Required behind CloudFront.** The default `X-Real-IP` is absent, which would make every request appear to share one IP and break rate limiting |
-| `LOGIN_RATELIMIT_SECONDS` | `60` | Brute-force resistance |
-| `LOGIN_RATELIMIT_MAX_BURST` | `5` | |
-| `ROCKET_PROFILE` | `release` | |
-| `SIGNUPS_VERIFY` | `false` | No email available |
+| Variable                    | Value                   | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| --------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `DATA_FOLDER`               | `/mnt/data`             | EFS mount                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `DATABASE_URL`              | `/mnt/data/db.sqlite3`  | SQLite file                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `ENABLE_DB_WAL`             | **`false`**             | **Mandatory — deployment blocker without it.** Vaultwarden enables WAL at startup by default. SQLite's WAL mode coordinates readers through a shared-memory file mapped with `mmap`, which network filesystems do not provide, so on EFS the process aborts with `Failed to turn on WAL` and never serves a request. It must be present from the very first boot: a single startup without it writes WAL mode into the database file |
+| `DOMAIN`                    | CloudFront URL (see §7) | Absolute URL generation                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `SIGNUPS_ALLOWED`           | `false`                 | Set after the owner account exists                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `INVITATIONS_ALLOWED`       | `false`                 | Single user                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `ADMIN_TOKEN`               | **unset**               | Disables `/admin` entirely — see §6                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `DISABLE_ICON_DOWNLOAD`     | `true`                  | No outbound internet                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `WEBSOCKET_ENABLED`         | `false`                 | Function URL cannot carry WebSocket                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `IP_HEADER`                 | `X-Forwarded-For`       | **Required behind CloudFront.** The default `X-Real-IP` is absent, which would make every request appear to share one IP and break rate limiting                                                                                                                                                                                                                                                                                     |
+| `LOGIN_RATELIMIT_SECONDS`   | `60`                    | Brute-force resistance                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `LOGIN_RATELIMIT_MAX_BURST` | `5`                     |                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `ROCKET_PROFILE`            | `release`               |                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `SIGNUPS_VERIFY`            | `false`                 | No email available                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
 ### 3.5 CloudFront + Origin Access Control — $0
 
@@ -188,16 +188,19 @@ with SigV4 through an Origin Access Control. A direct request to
 carries no signature — the function is not publicly invocable.
 
 ```ts
-const fnUrl = fn.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM });
+const fnUrl = fn.addFunctionUrl({
+  authType: lambda.FunctionUrlAuthType.AWS_IAM,
+});
 const origin = origins.FunctionUrlOrigin.withOriginAccessControl(fnUrl);
 
 const shared = {
   origin,
-  originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+  originRequestPolicy:
+    cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
   viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
 };
 
-new cloudfront.Distribution(this, 'Cdn', {
+new cloudfront.Distribution(this, "Cdn", {
   defaultBehavior: {
     ...shared,
     cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
@@ -205,10 +208,22 @@ new cloudfront.Distribution(this, 'Cdn', {
   },
   additionalBehaviors: {
     // Web-vault static assets: cacheable, no credentials, never touch the DB.
-    '/app/*':     { ...shared, cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED },
-    '/images/*':  { ...shared, cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED },
-    '/fonts/*':   { ...shared, cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED },
-    '/scripts/*': { ...shared, cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED },
+    "/app/*": {
+      ...shared,
+      cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+    },
+    "/images/*": {
+      ...shared,
+      cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+    },
+    "/fonts/*": {
+      ...shared,
+      cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+    },
+    "/scripts/*": {
+      ...shared,
+      cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+    },
   },
 });
 ```
@@ -261,19 +276,19 @@ The backup role gets EFS client access plus `s3:PutObject` on this bucket only.
 
 ## 4. Cost model
 
-| Resource | First 12 months | Steady state |
-|---|---|---|
-| Lambda invocations (~3k/month of 1M free, perpetual) | $0 | $0 |
-| Lambda GB-seconds (~2k of 400k free, perpetual) | $0 | $0 |
-| Lambda Function URL | $0 | $0 |
-| CloudFront (1 TB + 10M requests free, perpetual) | $0 | $0 |
-| VPC, subnet, security groups, S3 gateway endpoint | $0 | $0 |
-| EFS One Zone, ~50 MB used | $0 (5 GB free tier) | $0.16 |
-| ECR private, ~120 MB | $0 (500 MB free tier) | $0.012 |
-| S3, ~0.5 GB of compressed backups | $0 (5 GB free tier) | $0.012 |
-| CloudWatch Logs (5 GB/month free, perpetual) | $0 | $0 |
-| Data transfer out (100 GB/month free, perpetual) | $0 | $0 |
-| **Total** | **$0.00/month** | **≈ $0.18/month** |
+| Resource                                             | First 12 months       | Steady state      |
+| ---------------------------------------------------- | --------------------- | ----------------- |
+| Lambda invocations (~3k/month of 1M free, perpetual) | $0                    | $0                |
+| Lambda GB-seconds (~2k of 400k free, perpetual)      | $0                    | $0                |
+| Lambda Function URL                                  | $0                    | $0                |
+| CloudFront (1 TB + 10M requests free, perpetual)     | $0                    | $0                |
+| VPC, subnet, security groups, S3 gateway endpoint    | $0                    | $0                |
+| EFS One Zone, ~50 MB used                            | $0 (5 GB free tier)   | $0.16             |
+| ECR private, ~120 MB                                 | $0 (500 MB free tier) | $0.012            |
+| S3, ~0.5 GB of compressed backups                    | $0 (5 GB free tier)   | $0.012            |
+| CloudWatch Logs (5 GB/month free, perpetual)         | $0                    | $0                |
+| Data transfer out (100 GB/month free, perpetual)     | $0                    | $0                |
+| **Total**                                            | **$0.00/month**       | **≈ $0.18/month** |
 
 For comparison: Lightsail's cheapest instance is $3.50/month; the Fargate design
 is roughly $10/month; a NAT Gateway alone would be $32.85/month.
@@ -299,12 +314,12 @@ invocation of the function itself.
 
 ### 5.2 What an unauthenticated attacker can reach
 
-| Endpoint | Exposure | Mitigation |
-|---|---|---|
-| `/identity/connect/token` | Master password guessing | Rate limit (5 per 60 s), strong master password, TOTP 2FA |
-| `/api/accounts/register` | Account creation | `SIGNUPS_ALLOWED=false` |
-| `/admin` | Admin panel | **Route does not exist** — `ADMIN_TOKEN` unset |
-| `/alive`, `/api/config` | Version and feature flags | Harmless |
+| Endpoint                  | Exposure                  | Mitigation                                                |
+| ------------------------- | ------------------------- | --------------------------------------------------------- |
+| `/identity/connect/token` | Master password guessing  | Rate limit (5 per 60 s), strong master password, TOTP 2FA |
+| `/api/accounts/register`  | Account creation          | `SIGNUPS_ALLOWED=false`                                   |
+| `/admin`                  | Admin panel               | **Route does not exist** — `ADMIN_TOKEN` unset            |
+| `/alive`, `/api/config`   | Version and feature flags | Harmless                                                  |
 
 ### 5.3 What is unreachable
 
