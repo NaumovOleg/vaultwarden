@@ -1,0 +1,9 @@
+{
+  "app": "npx ts-node --prefer-ts-exts bin/vaultwarden.ts",
+  "context": {
+    "vaultwarden:domain": "https://localhost",
+    "vaultwarden:alertEmail": "",
+    "vaultwarden:imageTag": "1.35.1-alpine",
+    "@aws-cdk/core:newStyleStackSynthesis": true
+  }
+}
