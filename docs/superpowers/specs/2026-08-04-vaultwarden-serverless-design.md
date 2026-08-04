@@ -136,12 +136,25 @@ arm64.
 | base image | `-alpine` | ~120 MB vs ~250 MB, halves ECR storage cost |
 | `memorySize` | 1024 MB | More memory buys more vCPU, shortening cold start. Usage stays far inside the free tier |
 | `timeout` | 30 s | Matches CloudFront's default origin response timeout |
-| `reservedConcurrentExecutions` | **1** | Serialises all database access, eliminating the SQLite-over-NFS locking failures that darioackermann documents. Also caps worst-case spend |
-| `logRetention` | 1 week | Keeps CloudWatch inside the perpetual 5 GB free tier |
+| `reservedConcurrentExecutions` | **10** | Caps worst-case spend. See below for why not 1 |
+| log group retention | 1 week | Keeps CloudWatch inside the perpetual 5 GB free tier. Use an explicit `logs.LogGroup`; the `logRetention` prop is deprecated |
 | filesystem | EFS access point at `/mnt/data` | |
 
-A concurrency limit of 1 costs nothing for a single user, whose client syncs are
-sequential and seconds apart.
+**Why concurrency is 10 and not 1.** A limit of 1 would serialise database
+access, but synchronous invocations above a reserved concurrency limit are not
+queued — Lambda rejects them immediately with a 429. Loading the web vault makes
+a browser request a dozen assets in parallel, so nearly all of them would fail
+and the page would not render. The web vault is required for initial account
+creation and TOTP enrolment, so this is not an acceptable trade.
+
+Those parallel requests are static files that never touch the database. A single
+user's database operations are inherently sequential. A limit of 10 absorbs the
+asset burst, still bounds worst-case spend, and does not create concurrent SQLite
+writers.
+
+The SQLite-over-NFS failures documented by darioackermann are addressed instead
+by disabling WAL (§3.4) and by CloudFront caching static assets so repeat loads
+never reach the function (§3.5).
 
 **IAM execution role — least privilege:** `elasticfilesystem:ClientMount` and
 `ClientWrite` scoped to the specific access point ARN, plus CloudWatch Logs.
@@ -154,6 +167,7 @@ credentials grant access to nothing beyond the filesystem it already serves.
 |---|---|---|
 | `DATA_FOLDER` | `/mnt/data` | EFS mount |
 | `DATABASE_URL` | `/mnt/data/db.sqlite3` | SQLite file |
+| `ENABLE_DB_WAL` | **`false`** | **Mandatory — deployment blocker without it.** Vaultwarden enables WAL at startup by default. SQLite's WAL mode coordinates readers through a shared-memory file mapped with `mmap`, which network filesystems do not provide, so on EFS the process aborts with `Failed to turn on WAL` and never serves a request. It must be present from the very first boot: a single startup without it writes WAL mode into the database file |
 | `DOMAIN` | CloudFront URL (see §7) | Absolute URL generation |
 | `SIGNUPS_ALLOWED` | `false` | Set after the owner account exists |
 | `INVITATIONS_ALLOWED` | `false` | Single user |
@@ -175,14 +189,26 @@ carries no signature — the function is not publicly invocable.
 
 ```ts
 const fnUrl = fn.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM });
+const origin = origins.FunctionUrlOrigin.withOriginAccessControl(fnUrl);
+
+const shared = {
+  origin,
+  originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+  viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+};
 
 new cloudfront.Distribution(this, 'Cdn', {
   defaultBehavior: {
-    origin: origins.FunctionUrlOrigin.withOriginAccessControl(fnUrl),
+    ...shared,
     cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
-    originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
     allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
-    viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+  },
+  additionalBehaviors: {
+    // Web-vault static assets: cacheable, no credentials, never touch the DB.
+    '/app/*':     { ...shared, cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED },
+    '/images/*':  { ...shared, cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED },
+    '/fonts/*':   { ...shared, cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED },
+    '/scripts/*': { ...shared, cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED },
   },
 });
 ```
@@ -190,8 +216,13 @@ new cloudfront.Distribution(this, 'Cdn', {
 `ALL_VIEWER_EXCEPT_HOST_HEADER` is mandatory: the SigV4 signature covers the
 origin host, so the viewer's `Host` header must not be forwarded.
 
-`CACHING_DISABLED` is mandatory: responses from a password vault API must never
-be cached at the edge.
+`CACHING_DISABLED` on the default behaviour is mandatory: responses from a
+password vault API must never be cached at the edge. Only the four static
+prefixes above are cached, and they carry no credentials.
+
+Caching static assets matters beyond latency. It keeps repeat web-vault loads
+from reaching the function at all, which cuts invocation count and removes the
+parallel-request burst discussed in §3.3.
 
 No geographic restriction — the user travels.
 
@@ -249,7 +280,7 @@ is roughly $10/month; a NAT Gateway alone would be $32.85/month.
 
 ### Cost guardrails
 
-- `reservedConcurrentExecutions: 1` physically bounds Lambda spend.
+- `reservedConcurrentExecutions: 10` bounds Lambda spend.
 - An AWS Budgets alert at $1/month (two budgets are free).
 - One-week log retention.
 
@@ -335,7 +366,7 @@ application for it.
 ### 5.6 Residual risk
 
 Sustained traffic against the endpoint raises invocation counts. This is a cost
-and availability concern, not a breach: concurrency is capped at 1, CloudFront's
+and availability concern, not a breach: concurrency is capped at 10, CloudFront's
 free tier absorbs 10 million requests per month, and the budget alert fires at $1.
 
 ## 6. Accepted limitations
@@ -349,6 +380,19 @@ free tier absorbs 10 million requests per month, and the budget alert fires at $
 - **Single AZ.** An AZ failure makes the vault unavailable until restored from S3.
 
 ## 7. Deployment
+
+### 7.0 Prerequisites
+
+- Node.js 24 and npm 11 (present)
+- `aws-cdk-lib` 2.263.0, `aws-cdk` CLI 2.1135.0
+- AWS credentials for the target account, region `eu-west-1`
+- **A container runtime is required for `cdk deploy`** — Docker Desktop, Colima,
+  or Podman. `DockerImageCode.fromImageAsset` builds the image during asset
+  publishing. None is currently installed on this machine.
+
+  Unit tests are unaffected: at synthesis time CDK only hashes the asset
+  directory, so `cdk synth` and the assertion tests run without a container
+  runtime.
 
 The CloudFront domain is not known before the distribution exists, and the Lambda
 environment needs it for `DOMAIN`. Wiring `distribution.distributionDomainName`
@@ -406,3 +450,10 @@ three.
 - Multi-region or multi-AZ redundancy
 - S3-backed `DATA_FOLDER` via the OpenDAL backend
 - Aurora DSQL
+- **Serving the web vault's static assets from S3** rather than from the
+  function. This is the architecturally cleaner split — it is what PR #5591 and
+  Chase Douglas both do — and would cut invocations further while removing the
+  asset burst entirely. It is deferred because it requires extracting the bundled
+  web vault from the image or tracking `bw_web_builds` releases separately, and
+  the CloudFront caching in §3.5 already addresses the practical problem. This is
+  the escape hatch if browser loads prove unreliable.
