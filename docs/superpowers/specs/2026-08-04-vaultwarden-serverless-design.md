@@ -172,7 +172,7 @@ credentials grant access to nothing beyond the filesystem it already serves.
 | `SIGNUPS_ALLOWED`           | `false`                 | Set after the owner account exists                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `INVITATIONS_ALLOWED`       | `false`                 | Single user                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `ADMIN_TOKEN`               | **unset**               | Disables `/admin` entirely — see §6                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `DISABLE_ICON_DOWNLOAD`     | `true`                  | No outbound internet                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `ICON_SERVICE`              | `duckduckgo`            | Website favicons without outbound internet from the function: Vaultwarden answers `/icons/<domain>/icon.png` with an HTTP redirect instead of fetching the image itself, and the client (browser extension, app, or web vault) fetches it directly from DuckDuckGo. `duckduckgo` is one of Vaultwarden's built-in presets, whose hosts are already covered by the web vault's `img-src` Content-Security-Policy — a custom icon URL is not (dani-garcia/vaultwarden#2623) and would fail silently. DuckDuckGo over Google because it does not tie the request to an account. See §6 for the privacy trade-off this implies |
 | `WEBSOCKET_ENABLED`         | `false`                 | Function URL cannot carry WebSocket                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `IP_HEADER`                 | `X-Forwarded-For`       | **Required behind CloudFront.** The default `X-Real-IP` is absent, which would make every request appear to share one IP and break rate limiting                                                                                                                                                                                                                                                                                     |
 | `LOGIN_RATELIMIT_SECONDS`   | `60`                    | Brute-force resistance                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -224,6 +224,12 @@ new cloudfront.Distribution(this, "Cdn", {
       ...shared,
       cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
     },
+    // Icon-service redirects: identical per domain, no credentials. Must be
+    // cached — see the paragraph below.
+    "/icons/*": {
+      ...shared,
+      cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+    },
   },
 });
 ```
@@ -232,12 +238,20 @@ new cloudfront.Distribution(this, "Cdn", {
 origin host, so the viewer's `Host` header must not be forwarded.
 
 `CACHING_DISABLED` on the default behaviour is mandatory: responses from a
-password vault API must never be cached at the edge. Only the four static
-prefixes above are cached, and they carry no credentials.
+password vault API must never be cached at the edge. Only the five prefixes
+above are cached, and they carry no credentials.
 
 Caching static assets matters beyond latency. It keeps repeat web-vault loads
 from reaching the function at all, which cuts invocation count and removes the
 parallel-request burst discussed in §3.3.
+
+`/icons/*` is not optional. `ICON_SERVICE` (§3.4) makes every icon request a
+function invocation that produces a redirect; a vault list view requests many
+icons in parallel, and `reservedConcurrentExecutions: 10` would turn the
+surplus into 429s exactly as with the other static assets. Caching it means
+only the first request per edge location per domain ever reaches the
+function — the redirect itself never changes, so there is nothing lost by
+serving it from cache.
 
 No geographic restriction — the user travels.
 
@@ -389,7 +403,15 @@ free tier absorbs 10 million requests per month, and the budget alert fires at $
 - **No push notifications.** Function URLs do not support WebSocket. Clients fall
   back to polling; cross-device sync lags by a few minutes.
 - **No email.** No email-based 2FA, password hints, or invitations. TOTP works.
-- **No website favicons.** No outbound internet from the VPC.
+- **Website favicons cost privacy, not money.** `ICON_SERVICE=duckduckgo`
+  makes the function answer icon requests with a redirect instead of fetching
+  the image itself, so it works with no outbound internet from the VPC — but
+  the *client* then fetches each icon directly from DuckDuckGo, which reveals
+  the domains in the vault to DuckDuckGo and to whatever network the client is
+  on. `internal` mode (Vaultwarden fetches and caches icons itself, so the
+  client only ever talks to this stack) would avoid that, but it is the one
+  mode that needs outbound internet, i.e. a NAT Gateway at $32.85/month —
+  roughly 180x this stack's entire budget — so it is rejected.
 - **Attachments and Sends capped at 6 MB** by the Lambda payload limit.
 - **Cold start of 2–4 seconds** on the first request after idle.
 - **Single AZ.** An AZ failure makes the vault unavailable until restored from S3.

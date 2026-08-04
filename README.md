@@ -234,7 +234,18 @@ which the database itself needs repair, not just a config fix.
   fall back to polling; cross-device sync lags by a few minutes.
 - **No email.** No email-based 2FA, password hints, or invitations. TOTP
   works.
-- **No website favicons.** No outbound internet from the VPC.
+- **Website favicons cost privacy, not money.** The stack sets
+  `ICON_SERVICE=duckduckgo` (`lib/constructs/application.ts`), so the function
+  answers icon requests with an HTTP redirect instead of fetching the image
+  itself — no outbound internet from the VPC is needed. But the *client*
+  (browser extension, app, or web vault) then fetches each icon directly from
+  DuckDuckGo, which reveals the domains stored in the vault to DuckDuckGo and
+  to whatever network the client is on. Vaultwarden's `internal` icon mode
+  avoids that entirely — icons are fetched and cached by the server, so the
+  client only ever talks to this stack — but it is the one mode that needs
+  outbound internet, which would mean a NAT Gateway at $32.85/month, roughly
+  180x this stack's entire budget. See §3.4 and §6 of the design spec for the
+  full reasoning.
 - **Attachments and Sends capped at 6 MB** by the Lambda payload limit.
 - **Cold start of 2–4 seconds** on the first request after idle.
 - **Single AZ.** An AZ failure makes the vault unavailable until restored from

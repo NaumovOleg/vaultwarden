@@ -70,8 +70,13 @@ export class Application extends Construct {
         SIGNUPS_ALLOWED: 'false',
         SIGNUPS_VERIFY: 'false',
         INVITATIONS_ALLOWED: 'false',
-        // No outbound internet from an isolated subnet.
-        DISABLE_ICON_DOWNLOAD: 'true',
+        // The function has no outbound internet, but an external icon
+        // service doesn't need it: Vaultwarden answers /icons/<domain>/icon.png
+        // with an HTTP redirect and never fetches the image itself — the
+        // client (browser extension, app, or web vault) fetches it directly
+        // from the provider. See the design spec's accepted-limitations
+        // section for the privacy trade-off this implies.
+        ICON_SERVICE: 'duckduckgo',
         // Function URLs cannot carry WebSocket; clients fall back to polling.
         WEBSOCKET_ENABLED: 'false',
         // CloudFront sets X-Forwarded-For, not Vaultwarden's default
@@ -116,6 +121,13 @@ export class Application extends Construct {
         '/images/*': cached,
         '/fonts/*': cached,
         '/scripts/*': cached,
+        // The redirect ICON_SERVICE produces is identical per domain and
+        // carries no credentials. Without caching it, every icon in a vault
+        // list re-invokes the function; a list view requests many icons in
+        // parallel, and reservedConcurrentExecutions: 10 would turn that
+        // into 429s. Caching means only the first request per edge location
+        // ever reaches the function.
+        '/icons/*': cached,
       },
       // No geo restriction: the owner travels.
       // No WAF: $5/month base is over thirty times the rest of the stack.

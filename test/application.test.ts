@@ -69,10 +69,17 @@ describe('Application function', () => {
     const env = appFunction(synth()).Properties.Environment.Variables;
     expect(env.SIGNUPS_ALLOWED).toBe('false');
     expect(env.INVITATIONS_ALLOWED).toBe('false');
-    expect(env.DISABLE_ICON_DOWNLOAD).toBe('true');
     expect(env.WEBSOCKET_ENABLED).toBe('false');
     expect(env.DATABASE_URL).toBe('/mnt/data/db.sqlite3');
     expect(env.DATA_FOLDER).toBe('/mnt/data');
+  });
+
+  it('uses the duckduckgo icon service, which redirects clients instead of fetching icons itself', () => {
+    const env = appFunction(synth()).Properties.Environment.Variables;
+    expect(env.ICON_SERVICE).toBe('duckduckgo');
+    // Leaving DISABLE_ICON_DOWNLOAD set alongside ICON_SERVICE would be
+    // contradictory configuration.
+    expect(env).not.toHaveProperty('DISABLE_ICON_DOWNLOAD');
   });
 
   it('rate limits login attempts', () => {
@@ -169,11 +176,11 @@ describe('Public entry point', () => {
     });
   });
 
-  it('caches the four static asset prefixes so repeat loads bypass Lambda', () => {
+  it('caches the five static/icon path prefixes so repeat loads bypass Lambda', () => {
     const dists = synth().findResources('AWS::CloudFront::Distribution');
     const behaviors = Object.values(dists)[0].Properties.DistributionConfig.CacheBehaviors;
     expect(behaviors.map((b: any) => b.PathPattern).sort())
-      .toEqual(['/app/*', '/fonts/*', '/images/*', '/scripts/*']);
+      .toEqual(['/app/*', '/fonts/*', '/icons/*', '/images/*', '/scripts/*']);
     for (const b of behaviors) {
       // CachingOptimized managed policy
       expect(b.CachePolicyId).toBe('658327ea-f89d-4fab-a63d-7e88639e58f6');
