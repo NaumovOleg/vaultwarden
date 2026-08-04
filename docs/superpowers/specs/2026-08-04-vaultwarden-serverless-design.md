@@ -1,0 +1,408 @@
+# Vaultwarden on AWS Serverless — Design
+
+**Date:** 2026-08-04
+**Status:** Approved for planning
+**Region:** `eu-west-1`
+**IaC:** AWS CDK v2, TypeScript
+
+## 1. Goal
+
+Run a self-hosted Vaultwarden instance for a single personal user at the lowest
+possible running cost, deployed entirely from one CDK stack.
+
+Cost target: $0.00/month during the first 12 months, under $0.20/month afterwards.
+
+### Non-goals
+
+- Multi-user or organisation features
+- High availability across Availability Zones
+- Email delivery
+- Push notifications over WebSocket
+
+## 2. Prior art evaluated
+
+| Project | IaC | Status | Verdict |
+|---|---|---|---|
+| [darioackermann/vaultwarden-serverless](https://github.com/darioackermann/vaultwarden-serverless) | Terraform | Last push Sep 2023 | Ideas only. Patches Vaultwarden sources with the `lambda-web` crate, pinning it to a 2023 build. Attaches an Elastic IP to the Lambda ENI, which is unsupported. No concurrency cap, so its documented random SQLite lock failures are self-inflicted. |
+| [vvondra/bitwarden-serverless](https://github.com/vvondra/bitwarden-serverless) | Serverless Framework | Archived Jun 2022 | Rejected. Not Vaultwarden — an independent Node.js reimplementation of the Bitwarden API on DynamoDB, abandoned since 2020, schema validation still a TODO. |
+| [richardneililagan/vaultwarden-ecs-fargate](https://github.com/richardneililagan/vaultwarden-ecs-fargate) | CDK | Partially maintained | Rejected on cost. Fargate is roughly $10/month. |
+| [PR #5591 — RFC: AWS Serverless](https://github.com/dani-garcia/vaultwarden/pull/5591) | CDK assets | Draft, unmerged | Rejected. Aurora DSQL + S3 + SES behind an `aws` feature flag. Requires maintaining a fork of an unmerged branch; DSQL lacks foreign keys and multi-statement DDL, which threatens future Vaultwarden migrations. |
+| [PR #5626 — OpenDAL file abstraction](https://github.com/dani-garcia/vaultwarden/pull/5626) | — | **Merged 2025-05-29**, shipped in 1.35.0 | Available but not used. See §3. |
+
+No existing CDK + Lambda + EFS implementation exists. This design is new.
+
+### Why S3 cannot replace EFS here
+
+PR #5626 routes `ATTACHMENTS_FOLDER`, `SENDS_FOLDER`, `ICON_CACHE_FOLDER` and
+`RSA_KEY_FILENAME` through Apache OpenDAL, so those can live on S3 via
+`DATA_FOLDER=s3://bucket/prefix`.
+
+`DATABASE_URL`, `TMP_FOLDER` and `TEMPLATES_FOLDER` are explicitly excluded and
+must remain local paths. SQLite requires a POSIX filesystem with working advisory
+locks, which object storage does not provide.
+
+A serverless deployment therefore needs either EFS (this design) or an external
+database engine (PR #5591). Since the S3 path would only move a handful of
+kilobytes of attachments off EFS while forcing a custom image build — the
+official image is compiled with `DB=sqlite,mysql,postgresql` and no `s3` feature —
+it is not worth the complexity. Everything lives on EFS.
+
+A third option, SQLite in `/tmp` with Litestream replication to S3, is rejected
+outright: Lambda freezes execution environments between invocations, so
+replication can be interrupted mid-write and corrupt the vault.
+
+## 3. Architecture
+
+```
+Internet
+   │
+   ▼
+CloudFront distribution                    public entry point, TLS, $0
+   │   Origin Access Control, SigV4-signed
+   ▼
+Lambda Function URL (authType: AWS_IAM)    unsigned requests → 403
+   │
+   ▼
+Lambda: Vaultwarden container              arm64, reservedConcurrency = 1
+   │   arm64, in VPC, no NAT
+   ▼
+EFS One Zone (Bursting)                    SQLite database + all data
+   ▲
+   │  nightly 03:00 UTC via EventBridge
+Backup Lambda (Python) ──► S3 ──► gateway VPC endpoint (free)
+```
+
+### 3.1 Networking — $0
+
+Single VPC, `10.0.0.0/24`, `maxAzs: 1`, `natGateways: 0`.
+One `PRIVATE_ISOLATED` subnet — no Internet Gateway, no outbound internet.
+
+One AZ is deliberate: it avoids cross-AZ data charges ($0.01/GB) and enables the
+EFS One Zone storage class. Availability risk is accepted and covered by the S3
+backup.
+
+A **Gateway VPC endpoint for S3** is required so the backup Lambda can reach the
+bucket without a NAT Gateway. Gateway endpoints are free; interface endpoints
+($7.30/month each) are not used.
+
+CloudWatch Logs need no endpoint — the Lambda service ships logs on the
+function's behalf outside the VPC network path.
+
+The VPC-attached cold start penalty was eliminated in 2019 by Hyperplane ENIs and
+is not a consideration.
+
+### 3.2 Storage — $0.16/month
+
+`efs.FileSystem`:
+
+| Setting | Value | Reason |
+|---|---|---|
+| `oneZone` | `true` | $0.16/GB-month instead of $0.30 |
+| `throughputMode` | `BURSTING` | No per-GB charge. `ELASTIC` would bill $0.03/GB read and $0.06/GB write |
+| `lifecyclePolicy` | not set | Infrequent Access is cheaper per GB but bills per access; at ~50 MB the saving is zero and the risk is not |
+| `performanceMode` | `GENERAL_PURPOSE` | Lowest latency |
+| `encrypted` | `true` | Free |
+| `removalPolicy` | `RETAIN` | **Mandatory.** Without it `cdk destroy` deletes the vault |
+
+`efs.AccessPoint`: path `/vaultwarden`, POSIX uid/gid 1000, `createAcl` 0755.
+
+**Filesystem policy:** allow only the two Lambda execution roles, require IAM
+authentication, deny `elasticfilesystem:ClientRootAccess`.
+
+### 3.3 Application Lambda — $0
+
+`lambda.DockerImageFunction` built from:
+
+```dockerfile
+FROM vaultwarden/server:1.35.1-alpine
+COPY --from=public.ecr.aws/awsguru/aws-lambda-adapter:1.0.1 /lambda-adapter /opt/extensions/lambda-adapter
+ENV AWS_LWA_PORT=8080 \
+    AWS_LWA_READINESS_CHECK_PATH=/alive \
+    AWS_LWA_ASYNC_INIT=true \
+    ROCKET_PORT=8080
+```
+
+The AWS Lambda Web Adapter runs as an `/opt/extensions` sidecar and proxies
+Lambda invocations to the Rocket HTTP server. **Vaultwarden's source is not
+modified** — unlike the `lambda-web` crate patch used by darioackermann, upgrading
+is a tag change. The public ECR adapter image is multi-arch, so one tag covers
+arm64.
+
+`ROCKET_PORT` must be overridden: the official image defaults it to 80.
+
+| Setting | Value | Reason |
+|---|---|---|
+| `architecture` | `ARM_64` | 20% cheaper per GB-second, faster cold start |
+| base image | `-alpine` | ~120 MB vs ~250 MB, halves ECR storage cost |
+| `memorySize` | 1024 MB | More memory buys more vCPU, shortening cold start. Usage stays far inside the free tier |
+| `timeout` | 30 s | Matches CloudFront's default origin response timeout |
+| `reservedConcurrentExecutions` | **1** | Serialises all database access, eliminating the SQLite-over-NFS locking failures that darioackermann documents. Also caps worst-case spend |
+| `logRetention` | 1 week | Keeps CloudWatch inside the perpetual 5 GB free tier |
+| filesystem | EFS access point at `/mnt/data` | |
+
+A concurrency limit of 1 costs nothing for a single user, whose client syncs are
+sequential and seconds apart.
+
+**IAM execution role — least privilege:** `elasticfilesystem:ClientMount` and
+`ClientWrite` scoped to the specific access point ARN, plus CloudWatch Logs.
+No S3, no SSM, no Secrets Manager. If the Vaultwarden process is compromised, its
+credentials grant access to nothing beyond the filesystem it already serves.
+
+### 3.4 Environment variables
+
+| Variable | Value | Purpose |
+|---|---|---|
+| `DATA_FOLDER` | `/mnt/data` | EFS mount |
+| `DATABASE_URL` | `/mnt/data/db.sqlite3` | SQLite file |
+| `DOMAIN` | CloudFront URL (see §7) | Absolute URL generation |
+| `SIGNUPS_ALLOWED` | `false` | Set after the owner account exists |
+| `INVITATIONS_ALLOWED` | `false` | Single user |
+| `ADMIN_TOKEN` | **unset** | Disables `/admin` entirely — see §6 |
+| `DISABLE_ICON_DOWNLOAD` | `true` | No outbound internet |
+| `WEBSOCKET_ENABLED` | `false` | Function URL cannot carry WebSocket |
+| `IP_HEADER` | `X-Forwarded-For` | **Required behind CloudFront.** The default `X-Real-IP` is absent, which would make every request appear to share one IP and break rate limiting |
+| `LOGIN_RATELIMIT_SECONDS` | `60` | Brute-force resistance |
+| `LOGIN_RATELIMIT_MAX_BURST` | `5` | |
+| `ROCKET_PROFILE` | `release` | |
+| `SIGNUPS_VERIFY` | `false` | No email available |
+
+### 3.5 CloudFront + Origin Access Control — $0
+
+The Function URL uses `authType: AWS_IAM`. CloudFront signs every origin request
+with SigV4 through an Origin Access Control. A direct request to
+`https://<id>.lambda-url.eu-west-1.on.aws` returns **403 Forbidden** because it
+carries no signature — the function is not publicly invocable.
+
+```ts
+const fnUrl = fn.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.AWS_IAM });
+
+new cloudfront.Distribution(this, 'Cdn', {
+  defaultBehavior: {
+    origin: origins.FunctionUrlOrigin.withOriginAccessControl(fnUrl),
+    cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+    originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+    allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+    viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+  },
+});
+```
+
+`ALL_VIEWER_EXCEPT_HOST_HEADER` is mandatory: the SigV4 signature covers the
+origin host, so the viewer's `Host` header must not be forwarded.
+
+`CACHING_DISABLED` is mandatory: responses from a password vault API must never
+be cached at the edge.
+
+No geographic restriction — the user travels.
+
+No WAF: $5/month base plus $1/rule is over thirty times the cost of the entire
+rest of the stack.
+
+CloudFront's free tier — 1 TB egress and 10 million HTTP requests per month — is
+perpetual, not a 12-month trial, and the expected load is a fraction of a percent
+of it.
+
+The CloudFront domain is also stable across function replacement, whereas a raw
+Function URL changes if the function is recreated.
+
+### 3.6 Backup — $0.024/month
+
+A separate Python 3.12 arm64 zip Lambda, triggered by EventBridge at
+`cron(0 3 * * ? *)`:
+
+1. Mounts the same EFS access point.
+2. Uses `sqlite3.Connection.backup()` to write a consistent snapshot to `/tmp`
+   (512 MB, free). This is an online backup — it does not require stopping
+   writers and cannot capture a torn page.
+3. Gzips and uploads to S3, keyed by UTC date.
+
+AWS Backup on EFS is **not** used: it copies the file in whatever state it finds
+it, so a snapshot taken mid-write produces an unusable database.
+
+S3 bucket: versioned, `BlockPublicAccess.BLOCK_ALL`, SSE-S3 encryption (KMS would
+add cost), lifecycle expiring objects and noncurrent versions after 90 days,
+`removalPolicy: RETAIN`.
+
+**Bucket policy:** `s3:PutObject` allowed only for the backup Lambda role; deny
+all other principals; deny any request where `aws:SecureTransport` is false.
+
+The backup role gets EFS client access plus `s3:PutObject` on this bucket only.
+
+## 4. Cost model
+
+| Resource | First 12 months | Steady state |
+|---|---|---|
+| Lambda invocations (~3k/month of 1M free, perpetual) | $0 | $0 |
+| Lambda GB-seconds (~2k of 400k free, perpetual) | $0 | $0 |
+| Lambda Function URL | $0 | $0 |
+| CloudFront (1 TB + 10M requests free, perpetual) | $0 | $0 |
+| VPC, subnet, security groups, S3 gateway endpoint | $0 | $0 |
+| EFS One Zone, ~50 MB used | $0 (5 GB free tier) | $0.16 |
+| ECR private, ~120 MB | $0 (500 MB free tier) | $0.012 |
+| S3, ~0.5 GB of compressed backups | $0 (5 GB free tier) | $0.012 |
+| CloudWatch Logs (5 GB/month free, perpetual) | $0 | $0 |
+| Data transfer out (100 GB/month free, perpetual) | $0 | $0 |
+| **Total** | **$0.00/month** | **≈ $0.18/month** |
+
+For comparison: Lightsail's cheapest instance is $3.50/month; the Fargate design
+is roughly $10/month; a NAT Gateway alone would be $32.85/month.
+
+### Cost guardrails
+
+- `reservedConcurrentExecutions: 1` physically bounds Lambda spend.
+- An AWS Budgets alert at $1/month (two budgets are free).
+- One-week log retention.
+
+## 5. Security model
+
+### 5.1 The endpoint is public, and cannot be otherwise
+
+Official Bitwarden clients are ordinary HTTPS clients. They cannot sign SigV4
+requests, send arbitrary headers, or present client certificates. Any endpoint
+reachable by the user's phone is reachable by the internet. This is a property of
+the client protocol, not a gap in this design.
+
+CloudFront + OAC therefore does not make the service private. It relocates the
+public entry point to a service that can be hardened, and closes direct
+invocation of the function itself.
+
+### 5.2 What an unauthenticated attacker can reach
+
+| Endpoint | Exposure | Mitigation |
+|---|---|---|
+| `/identity/connect/token` | Master password guessing | Rate limit (5 per 60 s), strong master password, TOTP 2FA |
+| `/api/accounts/register` | Account creation | `SIGNUPS_ALLOWED=false` |
+| `/admin` | Admin panel | **Route does not exist** — `ADMIN_TOKEN` unset |
+| `/alive`, `/api/config` | Version and feature flags | Harmless |
+
+### 5.3 What is unreachable
+
+- The SQLite file — only via the Lambda role's EFS client permission, inside the VPC.
+- The backup bucket — the policy names only the backup role.
+- Direct Lambda invocation — 403 without a CloudFront SigV4 signature.
+- The AWS account — no path from the Vaultwarden process.
+
+Vault contents are encrypted client-side. Full server compromise yields
+ciphertext; the key is derived from the master password and never reaches the
+server.
+
+### 5.4 Owner obligations
+
+1. Set `SIGNUPS_ALLOWED=false` immediately after creating the owner account.
+2. Use a long, unique master password. **There is no recovery.** Losing it loses
+   everything, permanently.
+3. Enable TOTP two-factor authentication with a separate authenticator app, and
+   store the recovery code offline. See §5.5.
+4. Leave `ADMIN_TOKEN` unset. If the admin panel is ever needed, enable it in a
+   temporary deployment and remove it afterwards.
+5. Enable MFA on the AWS root account and do not use root for daily work.
+
+### 5.5 Two-factor authentication
+
+TOTP is the only viable second factor for this deployment. Validation is an
+HMAC-SHA1 computation over a time counter, requiring neither outbound internet
+nor email — the two things the isolated VPC does not provide. The Lambda clock is
+NTP-synchronised by AWS, so drift is not a concern. The web vault needed to
+enrol a device ships inside the official image.
+
+WebAuthn/FIDO2 is deliberately not used: it binds the credential to an origin,
+and the two-pass first deployment (§7) leaves `DOMAIN` at a placeholder until the
+second pass, which would invalidate a key registered in between. TOTP is
+origin-independent.
+
+**Lockout risk.** With the admin panel disabled and no email, the usual 2FA reset
+paths do not exist. Two recovery routes:
+
+1. The **recovery code** Vaultwarden displays once at enrolment. Record it on
+   paper, stored separately from the phone. This is the primary route.
+2. Infrastructure ownership. Redeploy with `ADMIN_TOKEN` temporarily set, clear
+   the 2FA entry through `/admin`, then deploy again without it. The EFS database
+   is also directly reachable from a one-off maintenance function.
+
+Route 2 is what makes disabling the admin panel safe here rather than reckless.
+It is not available to a self-hoster without infrastructure access.
+
+**Vault-stored TOTP seeds** (Bitwarden's built-in authenticator) are a separate
+feature. Vaultwarden grants premium status to all users by default, so it is
+available. Codes are generated client-side from an encrypted seed; the server
+never sees the plaintext and is not involved in the computation, so cold starts
+and the absent internet path are irrelevant.
+
+Do **not** store the Vaultwarden account's own TOTP seed in the vault it
+protects — that collapses both factors into one. Use a separate authenticator
+application for it.
+
+### 5.6 Residual risk
+
+Sustained traffic against the endpoint raises invocation counts. This is a cost
+and availability concern, not a breach: concurrency is capped at 1, CloudFront's
+free tier absorbs 10 million requests per month, and the budget alert fires at $1.
+
+## 6. Accepted limitations
+
+- **No push notifications.** Function URLs do not support WebSocket. Clients fall
+  back to polling; cross-device sync lags by a few minutes.
+- **No email.** No email-based 2FA, password hints, or invitations. TOTP works.
+- **No website favicons.** No outbound internet from the VPC.
+- **Attachments and Sends capped at 6 MB** by the Lambda payload limit.
+- **Cold start of 2–4 seconds** on the first request after idle.
+- **Single AZ.** An AZ failure makes the vault unavailable until restored from S3.
+
+## 7. Deployment
+
+The CloudFront domain is not known before the distribution exists, and the Lambda
+environment needs it for `DOMAIN`. Wiring `distribution.distributionDomainName`
+into the function's environment creates a circular CloudFormation dependency
+(function → URL → distribution → function).
+
+This is resolved with a documented two-pass first deployment rather than a custom
+resource, which would mutate the function outside CloudFormation and cause drift:
+
+1. `cdk deploy` — `DOMAIN` takes its placeholder default.
+2. Read `CdnDomainName` from the stack outputs.
+3. Set it in `cdk.json` context as `vaultwarden:domain`.
+4. `cdk deploy` again.
+
+Subsequent deployments are single-pass. `DOMAIN` only affects absolute URL
+generation and WebAuthn origin validation, so the interim state is functional for
+TOTP-based setup.
+
+## 8. Restore procedure
+
+1. Download the desired object version from the backup bucket.
+2. `cdk deploy` the stack if the infrastructure is gone (EFS is `RETAIN`, so it
+   normally survives).
+3. Invoke a one-off restore path: gunzip the snapshot and write it to
+   `/mnt/data/db.sqlite3` with the application function stopped
+   (`reservedConcurrentExecutions: 0`).
+4. Restore concurrency to 1.
+
+This procedure must be tested once after the first deployment. An untested backup
+is not a backup.
+
+## 9. Repository layout
+
+```
+bin/vaultwarden.ts               CDK app entry point
+lib/vaultwarden-stack.ts         The single stack
+lib/constructs/storage.ts        VPC, EFS, access point, S3 bucket
+lib/constructs/application.ts    Container function, Function URL, CloudFront
+lib/constructs/backup.ts         Backup function, schedule, bucket policy
+docker/vaultwarden/Dockerfile    Official image + Lambda Web Adapter
+lambda/backup/index.py           SQLite online backup to S3
+cdk.json
+package.json
+```
+
+Splitting the stack into three constructs keeps each file focused on one
+responsibility with an explicit interface: `storage` exposes the VPC, access
+point and bucket; `application` consumes the first two; `backup` consumes all
+three.
+
+## 10. Out of scope
+
+- Custom domain name (would require a Route 53 hosted zone at $0.50/month)
+- AWS WAF
+- Multi-region or multi-AZ redundancy
+- S3-backed `DATA_FOLDER` via the OpenDAL backend
+- Aurora DSQL
