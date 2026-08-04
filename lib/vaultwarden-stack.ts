@@ -1,6 +1,8 @@
 import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import { Application } from './constructs/application';
+import { Backup } from './constructs/backup';
+import { CostGuard } from './constructs/cost-guard';
 import { Storage } from './constructs/storage';
 
 export class VaultwardenStack extends cdk.Stack {
@@ -10,6 +12,18 @@ export class VaultwardenStack extends cdk.Stack {
     const storage = new Storage(this, 'Storage');
 
     new cdk.CfnOutput(this, 'BackupBucketName', { value: storage.backupBucket.bucketName });
+
+    new Backup(this, 'Backup', {
+      vpc: storage.vpc,
+      fileSystem: storage.fileSystem,
+      accessPoint: storage.accessPoint,
+      bucket: storage.backupBucket,
+    });
+
+    const alertEmail = this.node.tryGetContext('vaultwarden:alertEmail');
+    if (alertEmail) {
+      new CostGuard(this, 'CostGuard', { monthlyLimitUsd: 1, notifyEmail: alertEmail });
+    }
 
     const domain = this.node.tryGetContext('vaultwarden:domain') ?? 'https://localhost';
     const imageTag = this.node.tryGetContext('vaultwarden:imageTag') ?? '1.35.1-alpine';
