@@ -13,14 +13,16 @@ export class VaultwardenStack extends cdk.Stack {
 
     new cdk.CfnOutput(this, 'BackupBucketName', { value: storage.backupBucket.bucketName });
 
+    const alertEmail = this.node.tryGetContext('vaultwarden:alertEmail');
+
     new Backup(this, 'Backup', {
       vpc: storage.vpc,
       fileSystem: storage.fileSystem,
       accessPoint: storage.accessPoint,
       bucket: storage.backupBucket,
+      alertEmail,
     });
 
-    const alertEmail = this.node.tryGetContext('vaultwarden:alertEmail');
     if (alertEmail) {
       new CostGuard(this, 'CostGuard', { monthlyLimitUsd: 1, notifyEmail: alertEmail });
     }

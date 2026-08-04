@@ -4,18 +4,29 @@ import { Backup } from '../lib/constructs/backup';
 import { CostGuard } from '../lib/constructs/cost-guard';
 import { Storage } from '../lib/constructs/storage';
 
-function synth(): Template {
+interface Built {
+  readonly stack: cdk.Stack;
+  readonly backup: Backup;
+  readonly template: Template;
+}
+
+function build(alertEmail?: string): Built {
   const app = new cdk.App();
   const stack = new cdk.Stack(app, 'S', { env: { account: '111111111111', region: 'eu-west-1' } });
   const storage = new Storage(stack, 'Storage');
-  new Backup(stack, 'Backup', {
+  const backup = new Backup(stack, 'Backup', {
     vpc: storage.vpc,
     fileSystem: storage.fileSystem,
     accessPoint: storage.accessPoint,
     bucket: storage.backupBucket,
+    alertEmail,
   });
   new CostGuard(stack, 'CostGuard', { monthlyLimitUsd: 1, notifyEmail: 'test@example.com' });
-  return Template.fromStack(stack);
+  return { stack, backup, template: Template.fromStack(stack) };
+}
+
+function synth(): Template {
+  return build().template;
 }
 
 function backupFunction(t: Template): any {
@@ -23,6 +34,11 @@ function backupFunction(t: Template): any {
   const match = Object.values(fns).find((f: any) => f.Properties.FunctionName === 'vaultwarden-backup');
   expect(match).toBeDefined();
   return match;
+}
+
+/** Logical ID of a construct's default child, for pinning assertions to a specific resource. */
+function logicalIdOf(stack: cdk.Stack, construct: { node: { defaultChild?: unknown } }): string {
+  return stack.getLogicalId(construct.node.defaultChild as cdk.CfnElement);
 }
 
 describe('Backup', () => {
@@ -41,15 +57,91 @@ describe('Backup', () => {
     expect(fn.Environment.Variables.DB_PATH).toBe('/mnt/data/db.sqlite3');
   });
 
-  it('may write backups but may not read or delete them', () => {
-    const text = JSON.stringify(synth().findResources('AWS::IAM::Policy'));
-    expect(text).toContain('s3:PutObject');
-    expect(text).not.toContain('s3:DeleteObject');
-    expect(text).not.toContain('s3:GetObject');
+  it('sizes /tmp for a snapshot and its gzip to coexist, not the unsized 512 MiB default', () => {
+    expect(backupFunction(synth()).Properties.EphemeralStorage).toEqual({ Size: 1024 });
+  });
+
+  it('grants the backup role exactly EFS mount/write plus write-only S3 upload actions', () => {
+    const { stack, backup, template } = build();
+    const roleLogicalId = logicalIdOf(stack, backup.handler.role!);
+
+    // Scoped to the backup handler's own role policy specifically, not "whichever
+    // IAM::Policy resources happen to exist in this synth" — a future construct
+    // added to this stack that also creates a policy must not silently widen (or
+    // narrow) what this assertion is checking.
+    const policies = template.findResources('AWS::IAM::Policy');
+    const ownPolicy = Object.values(policies).find(
+      (p: any) => p.Properties.Roles?.some((r: any) => r.Ref === roleLogicalId),
+    ) as any;
+    expect(ownPolicy).toBeDefined();
+
+    const actions = ownPolicy.Properties.PolicyDocument.Statement
+      .flatMap((s: any) => (Array.isArray(s.Action) ? s.Action : [s.Action]))
+      .sort();
+
+    // Positive allow-list, not a denylist: any action added beyond this exact
+    // set — s3:GetObject, s3:DeleteObject, s3:*, dynamodb:*, anything — fails
+    // this test, not just the handful of substrings a denylist happens to name.
+    // grantPut() on aws-cdk-lib 2.263.0 (no grantWriteWithoutAcl override in
+    // this project's context) issues six S3 actions, not the two the original
+    // plan assumed; asserted here as what synthesis actually produces.
+    expect(actions).toEqual([
+      'elasticfilesystem:ClientMount',
+      'elasticfilesystem:ClientWrite',
+      's3:Abort*',
+      's3:PutObject',
+      's3:PutObjectLegalHold',
+      's3:PutObjectRetention',
+      's3:PutObjectTagging',
+      's3:PutObjectVersionTagging',
+    ]);
+
+    // Belt-and-braces: even if the exact set above ever drifts, none of these
+    // broad wildcards may appear. Each would grant read or delete access wider
+    // than "write your own objects, abort your own multipart uploads" — the
+    // property that must hold is that a compromised backup role can neither
+    // exfiltrate nor destroy historical vault snapshots.
+    for (const wildcard of ['s3:*', 's3:Get*', 's3:Delete*', 's3:List*']) {
+      expect(actions).not.toContain(wildcard);
+    }
   });
 
   it('caps its own concurrency so a schedule storm cannot run away', () => {
     expect(backupFunction(synth()).Properties.ReservedConcurrentExecutions).toBe(1);
+  });
+
+  it('creates no failure alarm or topic when no alert email is configured', () => {
+    const { template } = build();
+    template.resourceCountIs('AWS::CloudWatch::Alarm', 0);
+    template.resourceCountIs('AWS::SNS::Topic', 0);
+  });
+
+  it('alarms on backup errors and emails the configured address when an alert email is set', () => {
+    const { stack, backup, template } = build('ops@example.com');
+    const handlerLogicalId = logicalIdOf(stack, backup.handler);
+
+    template.hasResourceProperties('AWS::SNS::Subscription', {
+      Protocol: 'email',
+      Endpoint: 'ops@example.com',
+    });
+
+    const topicLogicalIds = Object.keys(template.findResources('AWS::SNS::Topic'));
+    expect(topicLogicalIds).toHaveLength(1);
+
+    const alarms = template.findResources('AWS::CloudWatch::Alarm');
+    const errorAlarm = Object.values(alarms).find(
+      (a: any) =>
+        a.Properties.MetricName === 'Errors' &&
+        a.Properties.Namespace === 'AWS/Lambda' &&
+        a.Properties.Dimensions?.some(
+          (d: any) => d.Name === 'FunctionName' && d.Value?.Ref === handlerLogicalId,
+        ),
+    ) as any;
+    expect(errorAlarm).toBeDefined();
+    expect(errorAlarm.Properties.Threshold).toBe(1);
+    expect(errorAlarm.Properties.EvaluationPeriods).toBe(1);
+    expect(errorAlarm.Properties.TreatMissingData).toBe('notBreaching');
+    expect(errorAlarm.Properties.AlarmActions).toEqual([{ Ref: topicLogicalIds[0] }]);
   });
 });
 
