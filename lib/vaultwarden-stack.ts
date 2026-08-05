@@ -15,6 +15,22 @@ export class VaultwardenStack extends cdk.Stack {
 
     const alertEmail = this.node.tryGetContext('vaultwarden:alertEmail');
 
+    // Both the backup-failure alarm and the budget are conditional on this
+    // address, because an SNS subscription or a CfnBudget subscriber with an
+    // empty address fails at deploy time. That conditional is correct; what is
+    // not acceptable is it being silent. cdk.json ships the key blank, so the
+    // default synthesis has no alarm and no budget at all — and the backup
+    // bucket expires objects after 90 days, so a nightly backup that starts
+    // failing is invisible until the last good snapshot has already expired.
+    if (!alertEmail) {
+      cdk.Annotations.of(this).addWarning(
+        'vaultwarden:alertEmail is not set: this stack synthesises with NO backup-failure ' +
+        'alarm, NO SNS topic and NO AWS Budgets cost alert. A failing nightly backup will be ' +
+        'silent, and the S3 lifecycle rule expires the last good snapshot after 90 days. Set ' +
+        'it in cdk.json or pass --context vaultwarden:alertEmail=you@example.com.',
+      );
+    }
+
     new Backup(this, 'Backup', {
       vpc: storage.vpc,
       fileSystem: storage.fileSystem,
@@ -33,6 +49,13 @@ export class VaultwardenStack extends cdk.Stack {
     // set via --context vaultwarden:adminToken=... for a temporary deployment,
     // then redeploy without it.
     const adminToken = this.node.tryGetContext('vaultwarden:adminToken');
+    // Normalised to a string here rather than in the construct so that a JSON
+    // `true` in cdk.json and a CLI `--context vaultwarden:signupsAllowed=true`
+    // (always a string) mean the same thing. Anything that is not exactly
+    // "true" leaves registration closed — the fail-closed direction.
+    const signupsAllowed = String(
+      this.node.tryGetContext('vaultwarden:signupsAllowed') ?? 'false',
+    );
 
     const application = new Application(this, 'Application', {
       vpc: storage.vpc,
@@ -41,6 +64,7 @@ export class VaultwardenStack extends cdk.Stack {
       domain,
       imageTag,
       adminToken,
+      signupsAllowed,
     });
 
     new cdk.CfnOutput(this, 'CdnDomainName', {

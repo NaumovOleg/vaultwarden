@@ -82,8 +82,28 @@ describe('Application function', () => {
     expect(appFunction(synth()).Properties.Environment.Variables.IP_HEADER).toBe('X-Forwarded-For');
   });
 
+  it('opens registration only when the signupsAllowed prop says so — the bootstrap deploy', () => {
+    const app = new cdk.App();
+    const stack = new cdk.Stack(app, 'S', { env: { account: '111111111111', region: 'eu-west-1' } });
+    const storage = new Storage(stack, 'Storage');
+    new Application(stack, 'App', {
+      vpc: storage.vpc,
+      fileSystem: storage.fileSystem,
+      accessPoint: storage.accessPoint,
+      domain: 'https://example.cloudfront.net',
+      imageTag: '1.35.1-alpine',
+      signupsAllowed: 'true',
+    });
+    const t = Template.fromStack(stack);
+
+    expect(appFunction(t).Properties.Environment.Variables.SIGNUPS_ALLOWED).toBe('true');
+  });
+
   it('closes registration and disables features that need outbound internet', () => {
     const env = appFunction(synth()).Properties.Environment.Variables;
+    // Default, with the prop absent entirely. Vaultwarden has no first-user
+    // bootstrap exception, so this being unconditionally 'false' was what made
+    // the owner account impossible to create; it must still be the default.
     expect(env.SIGNUPS_ALLOWED).toBe('false');
     expect(env.INVITATIONS_ALLOWED).toBe('false');
     expect(env.WEBSOCKET_ENABLED).toBe('false');

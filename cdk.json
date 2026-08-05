@@ -5,6 +5,7 @@
     "vaultwarden:alertEmail": "",
     "vaultwarden:imageTag": "1.35.1-alpine",
     "vaultwarden:adminToken": "",
+    "vaultwarden:signupsAllowed": "false",
     "@aws-cdk/core:newStyleStackSynthesis": true
   }
 }

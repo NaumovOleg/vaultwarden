@@ -26,6 +26,25 @@ export interface ApplicationProps {
    * /admin, then redeploy with it unset again. See README §10 and design spec §5.5.
    */
   readonly adminToken?: string;
+  /**
+   * Vaultwarden's `SIGNUPS_ALLOWED`. `'false'` by default, and it must be
+   * `'false'` in steady state — an open server lets anyone on the internet
+   * register an account on it.
+   *
+   * It exists as a prop because with it hardcoded to `'false'` the owner
+   * account could never be created at all. Vaultwarden 1.35.1 admits a
+   * registration only when `Invitation::take(&email, ..) ||
+   * CONFIG.is_signup_allowed(&email)` (`src/api/core/accounts.rs`); there is no
+   * first-user bootstrap exception. With no `ADMIN_TOKEN` (so no `/admin` to
+   * send an invitation from) and no SMTP, a stack that ships `'false'` from the
+   * first deploy is a vault nobody can ever log into.
+   *
+   * The bootstrap is folded into the existing two-pass first deployment: pass 1
+   * runs with `--context vaultwarden:signupsAllowed=true`, pass 2 returns it to
+   * the `'false'` default along with the real DOMAIN. See README §4/§5 and
+   * design spec §5.4.
+   */
+  readonly signupsAllowed?: string;
 }
 
 const MOUNT_PATH = '/mnt/data';
@@ -52,7 +71,9 @@ export class Application extends Construct {
       // the first boot — one start without it writes WAL into the file.
       ENABLE_DB_WAL: 'false',
       DOMAIN: props.domain,
-      SIGNUPS_ALLOWED: 'false',
+      // Closed unless the operator deliberately opens it for the pass-1
+      // bootstrap deploy. See ApplicationProps.signupsAllowed.
+      SIGNUPS_ALLOWED: props.signupsAllowed === 'true' ? 'true' : 'false',
       SIGNUPS_VERIFY: 'false',
       INVITATIONS_ALLOWED: 'false',
       // The function has no outbound internet, but an external icon
