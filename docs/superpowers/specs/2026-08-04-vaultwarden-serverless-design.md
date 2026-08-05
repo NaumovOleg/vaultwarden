@@ -97,7 +97,8 @@ is not a consideration.
 
 | Setting           | Value             | Reason                                                                                                     |
 | ----------------- | ----------------- | ---------------------------------------------------------------------------------------------------------- |
-| `oneZone`         | `true`            | $0.16/GB-month instead of $0.30                                                                            |
+| `oneZone`         | `true`            | $0.16/GB-month instead of $0.30. Carries a trap: see `BackupPolicy` below                                  |
+| `BackupPolicy`    | `DISABLED` (L1)   | **Mandatory.** `CreateFileSystem` defaults automatic backups to `false` *except* when `AvailabilityZoneName` is specified — which `oneZone: true` does — so One Zone silently enrols the vault in daily AWS Backup jobs. That is an unbudgeted recurring charge, and it is precisely the mid-write file copy §3.6 rejects. It must be set through an L1 escape hatch: aws-cdk-lib 2.263.0 maps the L2 prop as `props.enableAutomaticBackups ? {status:'ENABLED'} : undefined`, so passing `false` emits nothing and leaves the inverted service default in force |
 | `throughputMode`  | `BURSTING`        | No per-GB charge. `ELASTIC` would bill $0.03/GB read and $0.06/GB write                                    |
 | `lifecyclePolicy` | not set           | Infrequent Access is cheaper per GB but bills per access; at ~50 MB the saving is zero and the risk is not |
 | `performanceMode` | `GENERAL_PURPOSE` | Lowest latency                                                                                             |
@@ -106,8 +107,24 @@ is not a consideration.
 
 `efs.AccessPoint`: path `/vaultwarden`, POSIX uid/gid 1000, `createAcl` 0755.
 
-**Filesystem policy:** allow only the two Lambda execution roles, require IAM
-authentication, deny `elasticfilesystem:ClientRootAccess`.
+**Filesystem policy (as built).** Two statements:
+
+1. Allow `elasticfilesystem:ClientMount` and `ClientWrite` to any principal,
+   conditioned on `elasticfilesystem:AccessedViaMountTarget` being true and
+   `aws:PrincipalAccount` matching this account.
+2. Deny everything when `aws:SecureTransport` is false.
+
+This deviates from the earlier draft of this section in two ways, both
+deliberate. It scopes by account-and-mount-target rather than by naming the
+Lambda execution roles, because naming them would create a circular dependency
+between `storage.ts` and the constructs that create those roles — and reaching a
+mount target already requires being inside this VPC's isolated subnet. And there
+are now **three** roles, not two: application, backup, and restore (§3.7).
+
+`ClientRootAccess` is denied by omission from the allow list, not by an explicit
+`Deny` statement; the access point pins uid/gid 1000 regardless. Each role's own
+identity policy is the narrow grant (§3.3, §3.6, §3.7); the filesystem policy is
+the outer boundary.
 
 ### 3.3 Application Lambda — $0
 
@@ -169,7 +186,7 @@ credentials grant access to nothing beyond the filesystem it already serves.
 | `DATABASE_URL`              | `/mnt/data/db.sqlite3`  | SQLite file                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `ENABLE_DB_WAL`             | **`false`**             | **Mandatory — deployment blocker without it.** Vaultwarden enables WAL at startup by default. SQLite's WAL mode coordinates readers through a shared-memory file mapped with `mmap`, which network filesystems do not provide, so on EFS the process aborts with `Failed to turn on WAL` and never serves a request. It must be present from the very first boot: a single startup without it writes WAL mode into the database file |
 | `DOMAIN`                    | CloudFront URL (see §7) | Absolute URL generation                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `SIGNUPS_ALLOWED`           | `false`                 | Set after the owner account exists                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `SIGNUPS_ALLOWED`           | `false` by default, `true` for the pass-1 bootstrap deploy only | **Cannot be unconditionally `false`, or the vault has no accounts and never can.** Vaultwarden 1.35.1 admits a registration only when `Invitation::take(&email, ..) \|\| CONFIG.is_signup_allowed(&email)` (`src/api/core/accounts.rs`); there is no first-user exception. With `ADMIN_TOKEN` unset there is no `/admin` to issue an invitation from, and there is no SMTP to deliver one. Wired to the `vaultwarden:signupsAllowed` context key, defaulting to `"false"`; the first deployment's pass 1 (§7) sets it `"true"`, the owner registers, and pass 2 returns it to `"false"` along with the real `DOMAIN`. Anything other than exactly `"true"` leaves it closed |
 | `INVITATIONS_ALLOWED`       | `false`                 | Single user                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `ADMIN_TOKEN`               | **unset**               | Disables `/admin` entirely — see §6                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `ICON_SERVICE`              | `duckduckgo`            | Website favicons without outbound internet from the function: Vaultwarden answers `/icons/<domain>/icon.png` with an HTTP redirect instead of fetching the image itself, and the client (browser extension, app, or web vault) fetches it directly from DuckDuckGo. `duckduckgo` is one of Vaultwarden's built-in presets, whose hosts are already covered by the web vault's `img-src` Content-Security-Policy — a custom icon URL is not (dani-garcia/vaultwarden#2623) and would fail silently. DuckDuckGo over Google because it does not tie the request to an account. See §6 for the privacy trade-off this implies |
@@ -275,18 +292,47 @@ A separate Python 3.12 arm64 zip Lambda, triggered by EventBridge at
    (512 MB, free). This is an online backup — it does not require stopping
    writers and cannot capture a torn page.
 3. Gzips and uploads to S3, keyed by UTC date.
+4. Emits the snapshot's uncompressed byte size as a CloudWatch Embedded Metric
+   Format line — `Vaultwarden/SnapshotBytes`, one structured log line, no new
+   AWS resources, one of CloudWatch's ten free custom metrics.
+
+**Why the size metric exists.** `validate_snapshot` checks
+`PRAGMA integrity_check` and that `sqlite_master` is non-empty. It deliberately
+does not look for Vaultwarden's own table names: that would couple this job to
+upstream's schema, so a Vaultwarden upgrade could silently break backups — the
+same class of failure the validation exists to catch. The gap that leaves is a
+*freshly-migrated, empty* database: full schema, zero users, passes both checks.
+That is the state after anything that replaces the EFS filesystem (see §7 on
+`cdk.context.json`) or after an erroneous restore. Ninety nightly uploads later,
+every snapshot holding the real vault has expired. Size is the schema-agnostic
+discriminator — an empty vault is tens of KB, a real one is not, and a real one
+does not shrink. No alarm is created by the stack: a threshold chosen at deploy
+time, before any data exists, would be noise. The README documents adding one
+once the vault's normal size is known.
 
 AWS Backup on EFS is **not** used: it copies the file in whatever state it finds
-it, so a snapshot taken mid-write produces an unusable database.
+it, so a snapshot taken mid-write produces an unusable database. It has to be
+turned **off explicitly** — the One Zone storage class inverts the service-side
+default, and the L2 prop cannot express `false`. See the `BackupPolicy` row in
+§3.2.
 
 S3 bucket: versioned, `BlockPublicAccess.BLOCK_ALL`, SSE-S3 encryption (KMS would
 add cost), lifecycle expiring objects and noncurrent versions after 90 days,
 `removalPolicy: RETAIN`.
 
-**Bucket policy:** `s3:PutObject` allowed only for the backup Lambda role; deny
-all other principals; deny any request where `aws:SecureTransport` is false.
+**Bucket policy:** the only bucket-policy statement is the `enforceSSL` deny —
+every request where `aws:SecureTransport` is false. There is deliberately **no**
+resource-policy statement naming the backup role or denying other principals.
+Access is scoped entirely through identity policies (§5.3): the backup role's own
+policy grants write actions, the restore role's own policy grants read actions,
+and nothing else in the account is granted anything on this bucket. A bucket
+policy that allow-listed principals would duplicate that in a second place with
+its own drift risk, and an explicit blanket `Deny` on other principals would also
+have to carve out the account's own administrators to remain recoverable.
 
-The backup role gets EFS client access plus `s3:PutObject` on this bucket only.
+The backup role gets EFS client access plus write-only S3 actions on this bucket
+only (`s3:PutObject`, `s3:Abort*`, and the object-tagging/retention writes CDK's
+`grantPut` issues alongside them). No read, no delete.
 
 ### 3.7 Restore — $0 (never invoked, never billed)
 
@@ -309,26 +355,63 @@ Two actions, selected by the invocation payload:
 
 - `{"action": "list"}` — returns recent backup object keys, newest first, capped
   at a sane limit, so the operator can choose one without S3 console access.
-- `{"action": "restore", "key": "...", "confirm": "OVERWRITE-VAULT"}` — performs
-  the restore, in this order: refuse unless `confirm` matches exactly; refuse
-  unless the application function's reserved concurrency is 0 (checked live via
-  `lambda:GetFunctionConcurrency`, bypassable with `"force": true` for the case
-  where the check itself is broken); download and decompress the snapshot to
-  `/tmp`; validate the *downloaded* snapshot with the same `validate_snapshot`
-  the nightly job uses, before anything at the live path is touched; copy the
-  current live database aside to a timestamped name; write the new database into
-  place atomically (temp file on the same EFS filesystem, then `os.replace`,
-  never a direct write to the live path).
+- `{"action": "restore", "key": "...", "confirm": "OVERWRITE-VAULT",
+  "force": true}` — performs the restore, in this order: refuse unless `confirm`
+  matches exactly; refuse unless the application function's reserved concurrency
+  is 0 (checked via `lambda:GetFunctionConcurrency`, skipped when `"force":
+  true`); download and decompress the snapshot to `/tmp`; validate the
+  *downloaded* snapshot with the same `validate_snapshot` the nightly job uses,
+  before anything at the live path is touched; copy the current live database
+  aside to a timestamped name; write the new database into place atomically
+  (temp file on the same EFS filesystem, then `os.replace`, never a direct write
+  to the live path); move the old database's SQLite sidecar files out of the way.
 
-  The preservation copy is a plain file copy (`shutil.copy2`), not a
-  SQLite-online-backup-API snapshot the way the nightly job's is — safe in the
-  normal path specifically *because* the concurrency check just confirmed
-  nothing is writing to the source file. `"force": true` bypasses that same
-  check, so it also silently invalidates the assumption the plain copy relies
-  on: if Vaultwarden genuinely is still writing when `force` is used, the
-  preserved copy can itself be inconsistent. The live database is not at risk
-  either way — `atomic_replace`'s `os.replace` swap is unconditional — but the
-  preserved copy should not be trusted as an undo path for a `force`d restore.
+  **The concurrency check cannot succeed in this deployment, and `"force": true`
+  is the normal payload.** `get_function_concurrency` is a Lambda *control-plane*
+  call, and this function runs in a `PRIVATE_ISOLATED` subnet of a VPC with
+  `natGateways: 0` whose only endpoint is the free S3 gateway endpoint.
+  `lambda.<region>.amazonaws.com` resolves but is unroutable, so the connection is
+  black-holed. Adding an interface VPC endpoint would fix it at $7.30/month
+  against a ~$0.18/month stack, which is not a trade this design makes. So:
+
+  - The check stays in the code. It is correct, it works if the module runs
+    outside the VPC, and it would start working if the networking ever changed.
+  - The Lambda client is built with
+    `Config(connect_timeout=3, read_timeout=3, retries={'max_attempts': 1})`
+    instead of botocore's 60-second connect timeout and retries, and the
+    connection error is caught explicitly. A restore attempted without `force`
+    therefore fails in about three seconds with a message that says the check is
+    unreachable by design, that the operator must confirm reserved concurrency is
+    0 themselves, and that they should re-invoke with `"force": true` — rather
+    than hanging silently for minutes during an emergency.
+  - Stopping the application is still required. It moves from something the code
+    verifies to something the operator verifies, and §8 says so explicitly.
+
+  **The preservation copy uses the SQLite online backup API**
+  (`index.snapshot_database`), not `shutil.copy2`. Because `force` is the only
+  usable path, a plain byte copy would never have the "nothing is writing"
+  guarantee it depends on, and the preserved database — the entire undo path for
+  restoring the wrong snapshot — could be torn. The backup API needs no such
+  guarantee: it is consistent with writers active, and it applies any hot
+  rollback journal on the way. `force` therefore costs nothing. If the live
+  database is not something SQLite can open at all — one of the reasons to be
+  restoring — the bytes are preserved verbatim under a `.preserved-raw-` name
+  instead, so preservation can never be the thing that blocks a restore; that
+  artefact is forensic, not an undo path, because it was not a working database
+  to begin with.
+
+  **Sidecar files are cleared after the swap.** With `ENABLE_DB_WAL=false` (§3.4)
+  SQLite runs in rollback-journal mode, so `db.sqlite3-journal` exists whenever a
+  transaction is in flight — including when an execution environment is reclaimed
+  mid-write, which is exactly the class of event that leads to a restore. A
+  journal is bound to a *path*, not to the contents of the database that wrote it:
+  left in place, SQLite finds it beside the **restored** database on the next
+  open, treats it as a hot journal from a crashed writer, and rolls those stale
+  pages into a database that validated as sound seconds earlier. `-journal`,
+  `-wal` and `-shm` are therefore renamed aside (kept, for forensics, under names
+  that are not themselves sidecar names) immediately after `os.replace` — after,
+  never before, since until the swap the journal legitimately belongs to the
+  database at that path.
 
 **IAM — read access, on a separate role from the write-only backup role.** The
 restore role gets EFS client access, `s3:GetObject` plus the listing action its
@@ -355,17 +438,37 @@ schedule) still yields nothing beyond write access.
 | ECR private, ~120 MB                                 | $0 (500 MB free tier) | $0.012            |
 | S3, ~0.5 GB of compressed backups                    | $0 (5 GB free tier)   | $0.012            |
 | CloudWatch Logs (5 GB/month free, perpetual)         | $0                    | $0                |
+| CloudWatch custom metric `SnapshotBytes` (1 of 10 free) | $0                 | $0                |
 | Data transfer out (100 GB/month free, perpetual)     | $0                    | $0                |
 | **Total**                                            | **$0.00/month**       | **≈ $0.18/month** |
 
 For comparison: Lightsail's cheapest instance is $3.50/month; the Fargate design
 is roughly $10/month; a NAT Gateway alone would be $32.85/month.
 
+**Charges deliberately not incurred**, listed because each is one line of code
+away and two of them are on by default:
+
+| Not used                                    | Would cost      | Instead                                          |
+| ------------------------------------------- | --------------- | ------------------------------------------------ |
+| AWS Backup on EFS (**on by default** under One Zone) | ~$0.05/GB-month plus per-job cost, and an unusable mid-write copy | `BackupPolicy: DISABLED` via L1 escape hatch (§3.2); the nightly SQLite online backup (§3.6) |
+| Interface VPC endpoint for the Lambda control plane | $7.30/month | The restore function's concurrency check is unreachable by design; the operator verifies it and passes `"force": true` (§3.7) |
+| NAT Gateway (would enable `ICON_SERVICE=internal`) | $32.85/month | `ICON_SERVICE=duckduckgo`, a client-side redirect (§3.4, §6) |
+| AWS WAF                                     | $5/month base   | CloudFront + rate limiting + closed signups (§5) |
+
 ### Cost guardrails
 
 - `reservedConcurrentExecutions: 10` bounds Lambda spend.
 - An AWS Budgets alert at $1/month (two budgets are free).
 - One-week log retention.
+
+Both the budget and the nightly-backup failure alarm are conditional on
+`vaultwarden:alertEmail`, because an SNS subscription or a `CfnBudget` subscriber
+with an empty address fails at deploy time. `cdk.json` ships the key blank, so the
+default synthesis has **neither** — and the backup bucket expires objects after 90
+days, so a backup that starts failing would be invisible until the last good
+snapshot had already gone. The conditional is correct; the silence is not, so
+`lib/vaultwarden-stack.ts` emits a synth-time `Annotations.addWarning` naming
+exactly what is missing whenever the key is blank.
 
 ## 5. Security model
 
@@ -405,7 +508,15 @@ server.
 
 ### 5.4 Owner obligations
 
-1. Set `SIGNUPS_ALLOWED=false` immediately after creating the owner account.
+1. Run deployment pass 2 immediately after creating the owner account, returning
+   `SIGNUPS_ALLOWED` to its `false` default (§7). Registration **must** be open
+   during pass 1 — Vaultwarden has no first-user exception, and with no
+   `ADMIN_TOKEN` and no SMTP there is no invitation path (§3.4) — so the account
+   cannot be created any other way. But while it is open, anyone who reaches the
+   CloudFront URL can register on this server. They get no access to the vault
+   (everything is encrypted client-side under the owner's master password), but
+   they consume its invocations and its storage, unnoticed. Closing registration
+   again is what makes this a single-user server, and it is not optional.
 2. Use a long, unique master password. **There is no recovery.** Losing it loses
    everything, permanently.
 3. Enable TOTP two-factor authentication with a separate authenticator app, and
@@ -480,6 +591,18 @@ free tier absorbs 10 million requests per month, and the budget alert fires at $
 - **Attachments and Sends capped at 6 MB** by the Lambda payload limit.
 - **Cold start of 2–4 seconds** on the first request after idle.
 - **Single AZ.** An AZ failure makes the vault unavailable until restored from S3.
+- **The restore function cannot verify that the application is stopped.** The
+  check is a Lambda control-plane call and there is no route to the control plane
+  from the isolated VPC; the only fix costs forty times the stack's monthly bill.
+  It degrades to a three-second explicit error and an operator-performed
+  verification, not a silent hang — see §3.7 and §8.
+- **`cdk.context.json` is load-bearing for the vault's existence, not just for
+  reproducibility.** The EFS `AvailabilityZoneName` derives from
+  `vpc.availabilityZones[0]` and is immutable, so a reordered AZ list replaces the
+  filesystem. `UpdateReplacePolicy: Retain` keeps the old one, but all three
+  functions follow the stack to the new, empty one — and the nightly job would
+  back *that* up. The file must be committed and must not be regenerated
+  casually.
 
 ## 7. Deployment
 
@@ -496,22 +619,39 @@ free tier absorbs 10 million requests per month, and the budget alert fires at $
   directory, so `cdk synth` and the assertion tests run without a container
   runtime.
 
+- **`vaultwarden:alertEmail` must be set before the first deploy.** It is the
+  single subscriber for both the budget and the backup-failure alarm, and blank
+  means neither is created at all. See §4.
+- **`cdk.context.json` must be committed once it appears.** It pins the AZ the
+  EFS filesystem is bound to; see §6.
+
 The CloudFront domain is not known before the distribution exists, and the Lambda
 environment needs it for `DOMAIN`. Wiring `distribution.distributionDomainName`
 into the function's environment creates a circular CloudFormation dependency
 (function → URL → distribution → function).
 
 This is resolved with a documented two-pass first deployment rather than a custom
-resource, which would mutate the function outside CloudFormation and cause drift:
+resource, which would mutate the function outside CloudFormation and cause drift.
+The owner-account bootstrap (§3.4) rides along in the same two passes rather than
+adding a third, since it needs exactly the same shape — a temporary setting on
+pass 1, corrected on pass 2:
 
-1. `cdk deploy` — `DOMAIN` takes its placeholder default.
-2. Read `CdnDomainName` from the stack outputs.
-3. Set it in `cdk.json` context as `vaultwarden:domain`.
-4. `cdk deploy` again.
+1. `cdk deploy --context vaultwarden:signupsAllowed=true` — `DOMAIN` takes its
+   placeholder default, and registration is open.
+2. Read `CdnDomainName` from the stack outputs and open it. **Create the owner
+   account and enrol TOTP now** (§5.5); this is the only window in which the
+   account can be created.
+3. Set `CdnDomainName` in `cdk.json` context as `vaultwarden:domain`.
+4. `cdk deploy` again, **without** the `signupsAllowed` context flag. This applies
+   the real `DOMAIN` and returns `SIGNUPS_ALLOWED` to its `"false"` default.
+5. Verify: `aws lambda get-function-configuration --function-name vaultwarden`
+   reports the real domain and `SIGNUPS_ALLOWED=false`, and
+   `aws efs describe-backup-policy` reports `DISABLED` (§3.2).
 
 Subsequent deployments are single-pass. `DOMAIN` only affects absolute URL
 generation and WebAuthn origin validation, so the interim state is functional for
-TOTP-based setup.
+TOTP-based setup — which is why the account creation in step 2 works despite the
+placeholder domain.
 
 ## 8. Restore procedure
 
@@ -544,21 +684,34 @@ hands but cannot get it onto EFS by itself — `vaultwarden-restore` only ever
 reads from the bucket named by its own `BUCKET_NAME`, so finishing the
 restore through it still requires importing the bucket.
 
+**Before anything else, if the stack is gone:** copy the snapshots out of the
+orphaned bucket (`aws s3 cp --recursive`) to storage the operator controls. The
+90-day lifecycle rule keeps running while the operator deliberates, and it expires
+noncurrent versions on the same schedule, so versioning does not recover an object
+it has already deleted.
+
 1. Set the application function's reserved concurrency to 0
    (`aws lambda put-function-concurrency --function-name vaultwarden
    --reserved-concurrent-executions 0`), so Vaultwarden cannot be writing to
-   the database mid-restore.
+   the database mid-restore, **and confirm it** with
+   `aws lambda get-function-concurrency --function-name vaultwarden`. The
+   confirmation is the operator's job: the restore function cannot make this call
+   from inside the isolated VPC (§3.7), so nothing else will check it.
 2. Invoke `vaultwarden-restore` with `{"action": "list"}` to see recent backup
    keys, newest first.
-3. Invoke it again with
-   `{"action": "restore", "key": "<chosen key>", "confirm": "OVERWRITE-VAULT"}`.
-   The function independently re-verifies step 1 is done
-   (`lambda:GetFunctionConcurrency`, bypassable with `"force": true` only if
-   that check itself is broken — but note that bypassing it also invalidates
-   the guarantee that the preserved copy of the outgoing database is itself
-   consistent; see §3.7), downloads and validates the snapshot before
-   touching the live database, preserves the current database under a
-   timestamped name, and swaps the new one into place atomically.
+3. Invoke it again with `{"action": "restore", "key": "<chosen key>",
+   "confirm": "OVERWRITE-VAULT", "force": true}`. `"force": true` is the normal
+   payload, not an escape hatch — it skips the concurrency pre-check that cannot
+   run from this VPC, which is why step 1 asked the operator to verify it
+   directly. Omitting it produces an explicit "unreachable, verify it yourself,
+   re-invoke with force" error in about three seconds rather than a multi-minute
+   hang. Forcing does not weaken anything else: the function still downloads and
+   validates the snapshot before touching the live database, still preserves the
+   current database under a timestamped name — using the SQLite online backup
+   API, so that copy is consistent whether or not anything is writing — still
+   swaps the new one into place atomically, and then clears the old database's
+   `-journal`/`-wal`/`-shm` sidecars so none of them is applied to the restored
+   file. See §3.7.
 4. Restore the application function's concurrency to 10 (not 1 — see §3.3 for
    why 10 is the deployed value).
 
@@ -572,21 +725,33 @@ therefore actually tested.
 
 ```
 bin/vaultwarden.ts               CDK app entry point
-lib/vaultwarden-stack.ts         The single stack
+lib/vaultwarden-stack.ts         The single stack; context keys, alert-email warning
 lib/constructs/storage.ts        VPC, EFS, access point, S3 bucket
 lib/constructs/application.ts    Container function, Function URL, CloudFront
 lib/constructs/backup.ts         Backup function, schedule, restore function, IAM
+lib/constructs/cost-guard.ts     AWS Budgets monthly forecast alert
 docker/vaultwarden/Dockerfile    Official image + Lambda Web Adapter
-lambda/backup/index.py           SQLite online backup to S3
-lambda/backup/restore.py         Manual restore: list/validate/preserve/replace
+lambda/backup/index.py           SQLite online backup to S3, snapshot-size metric
+lambda/backup/restore.py         Manual restore: list/validate/preserve/replace/clear
+lambda/backup/test_index.py      pytest, not run by `npm test`
+lambda/backup/test_restore.py    pytest, not run by `npm test`
+test/storage.test.ts             jest assertion tests, one per construct
+test/application.test.ts
+test/backup.test.ts
+test/stack.test.ts               Whole-stack: context wiring, synth-time warnings
+test/dockerfile.test.ts
 cdk.json
 package.json
 ```
 
-Splitting the stack into three constructs keeps each file focused on one
+Splitting the stack into four constructs keeps each file focused on one
 responsibility with an explicit interface: `storage` exposes the VPC, access
 point and bucket; `application` consumes the first two; `backup` consumes all
-three.
+three; `cost-guard` consumes none of them and only needs an email address, which
+is why it is separate rather than folded into `backup`.
+
+The Python tests live beside the Lambda source and are **not** run by `npm test`
+— jest only scans `test/*.test.ts`. Both suites must be run.
 
 ## 10. Out of scope
 
