@@ -4,6 +4,7 @@
     "vaultwarden:domain": "https://localhost",
     "vaultwarden:alertEmail": "",
     "vaultwarden:imageTag": "1.35.1-alpine",
+    "vaultwarden:adminToken": "",
     "@aws-cdk/core:newStyleStackSynthesis": true
   }
 }

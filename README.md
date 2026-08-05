@@ -114,6 +114,7 @@ change again unless the distribution itself is replaced.
 | `vaultwarden:domain`        | Public URL, used for absolute link generation. Placeholder until pass 2. |
 | `vaultwarden:alertEmail`    | Subscriber address for the $1/month `CostGuard` budget alert. Optional — no alert is created if unset. |
 | `vaultwarden:imageTag`      | Vaultwarden container tag, passed to the Dockerfile's `VW_TAG` build arg. See [Upgrading](#8-upgrading-vaultwarden). |
+| `vaultwarden:adminToken`    | The 2FA-lockout escape hatch. Blank by default, which is what keeps `/admin` disabled. See [Security notes](#10-security-notes). |
 
 ## 5. First login
 
@@ -160,17 +161,31 @@ gzipped, consistent SQLite snapshot to the S3 bucket named in the
 `BackupBucketName` stack output. That Lambda's IAM role is granted
 **`s3:PutObject` only** — deliberately write-only, so that if the backup
 function or its role were ever compromised, it could not read past snapshots
-back out or delete them. Consequently the restore below is **not** something
-the backup Lambda can do for you: it is a manual action you take with your
-own AWS credentials, which do have read access to the bucket.
+back out or delete them.
 
-1. Find a snapshot to restore:
+Restoring is done by a second Lambda, `vaultwarden-restore`
+(`lib/constructs/backup.ts`, code in `lambda/backup/restore.py`), not by a
+hand-launched EC2 instance. The isolated VPC has no SSH/SSM path to a
+temporary instance and no security group rule admitting one to EFS — a
+restore procedure built around one cannot actually be carried out. The
+restore function instead gets the same EFS access the application and backup
+functions already have, plus its own IAM role with **read** access to the
+backup bucket (`s3:GetObject` and the listing action its `list` action needs).
+This does **not** weaken the backup role's write-only property above: they
+are two separate functions with two separate roles. A compromised backup
+role still cannot read or delete historical snapshots — only the restore
+role can, and unlike the backup role it is never invoked automatically
+(there is no EventBridge schedule for it; only a human invokes it). It costs
+$0 — a function that is never invoked is never billed.
+
+1. Find a snapshot to restore, by invoking the restore function with the
+   `list` action (no console access to the bucket needed):
    ```bash
-   BUCKET=$(aws cloudformation describe-stacks --stack-name VaultwardenStack \
+   aws lambda invoke --function-name vaultwarden-restore \
      --region eu-west-1 \
-     --query "Stacks[0].Outputs[?OutputKey=='BackupBucketName'].OutputValue" \
-     --output text)
-   aws s3 ls "s3://$BUCKET/db/" --region eu-west-1
+     --payload '{"action": "list"}' --cli-binary-format raw-in-base64-out \
+     /tmp/restore-list.json
+   cat /tmp/restore-list.json   # {"status": "ok", "keys": ["db/2026-08-04T03-00-00Z.sqlite3.gz", ...]}
    ```
 2. Stop the application function from writing to the database while you
    restore, by setting its reserved concurrency to zero:
@@ -178,26 +193,32 @@ own AWS credentials, which do have read access to the bucket.
    aws lambda put-function-concurrency --function-name vaultwarden \
      --region eu-west-1 --reserved-concurrent-executions 0
    ```
-3. Download and decompress the chosen snapshot with your own credentials
-   (the backup role cannot do this step — it has no `GetObject` grant):
+3. Invoke the restore function with the chosen key and the exact confirmation
+   phrase. This is the one step that overwrites the live database, so it is
+   guarded in depth: the function refuses unless `confirm` is exactly
+   `OVERWRITE-VAULT`, refuses unless it can independently verify (via
+   `lambda:GetFunctionConcurrency`) that step 2 actually happened, validates
+   the downloaded snapshot before touching anything at the live path, copies
+   the current database aside to a timestamped name before overwriting it,
+   and swaps the new file into place with an atomic `os.replace` rather than
+   writing the live path directly.
    ```bash
-   aws s3 cp "s3://$BUCKET/db/<snapshot>.gz" ./restore.sqlite3.gz --region eu-west-1
-   gunzip restore.sqlite3.gz
+   aws lambda invoke --function-name vaultwarden-restore \
+     --region eu-west-1 \
+     --payload '{"action": "restore", "key": "db/2026-08-04T03-00-00Z.sqlite3.gz", "confirm": "OVERWRITE-VAULT"}' \
+     --cli-binary-format raw-in-base64-out \
+     /tmp/restore-result.json
+   cat /tmp/restore-result.json
+   # {"status": "ok", "key": "db/...", "bytes": 53248,
+   #  "preserved": "/mnt/data/db.sqlite3.preserved-2026-08-04T12-00-00Z"}
    ```
-4. Write the file to `/mnt/data/db.sqlite3` on the EFS access point. The
-   isolated subnet has no route from your laptop, so this has to happen from
-   something inside the VPC — a temporary EC2 instance placed in the same
-   `PRIVATE_ISOLATED` subnet with the access point mounted over NFS is the
-   simplest option (`sudo mount -t efs -o tls,accesspoint=<id> <fs-id>: /mnt`),
-   matching uid/gid 1000 as the access point requires
-   (`lib/constructs/storage.ts`). If infrastructure was lost entirely, redeploy
-   first with `npx cdk deploy` — EFS uses `removalPolicy: RETAIN`, so it
-   normally survives a stack deletion and this step is not needed.
-5. Verify the restored file before trusting it:
-   ```bash
-   sqlite3 restore.sqlite3 "PRAGMA integrity_check;"   # must print: ok
-   ```
-6. Restore the application function's concurrency:
+   `preserved` names the timestamped copy of whatever database was live
+   immediately before this restore — the safety net if this turns out to be
+   the wrong snapshot. If the concurrency check itself is broken and you are
+   certain the application is stopped, add `"force": true` to the payload to
+   bypass it. This is dangerous — it exists only so a broken check cannot
+   itself block an emergency restore, not as a routine option.
+4. Restore the application function's concurrency:
    ```bash
    aws lambda put-function-concurrency --function-name vaultwarden \
      --region eu-west-1 --reserved-concurrent-executions 10
@@ -205,6 +226,18 @@ own AWS credentials, which do have read access to the bucket.
    (10, not 1 — that is the deployed `reservedConcurrentExecutions` for
    `vaultwarden` in `lib/constructs/application.ts`, chosen so a browser's
    burst of parallel asset requests does not get rejected with 429s.)
+
+**If the infrastructure itself is gone.** `removalPolicy: RETAIN`
+(`lib/constructs/storage.ts`) stops AWS from deleting the EFS filesystem and
+the S3 bucket when the stack is destroyed — but a fresh `cdk deploy` after a
+stack loss creates a **new** `AWS::EFS::FileSystem` with a new physical ID; it
+does **not** automatically re-attach to the orphaned one. Recovering the
+retained filesystem needs an explicit
+[`cdk import`](https://docs.aws.amazon.com/cdk/v2/guide/cli.html#cli-import)
+of the existing filesystem's physical ID into the new stack before any of the
+steps above can run. The retained S3 bucket does not have this problem — a
+new bucket cannot reuse the same name, but the old bucket and its snapshots
+remain reachable directly by name regardless of stack state.
 
 ## 8. Upgrading Vaultwarden
 
@@ -260,8 +293,10 @@ which the database itself needs repair, not just a config fix.
    loses everything, permanently.
 3. Enable TOTP two-factor authentication with a separate authenticator app,
    and store the recovery code offline. See below.
-4. Leave `ADMIN_TOKEN` unset. If the admin panel is ever needed, enable it in
-   a temporary deployment and remove it afterwards.
+4. Leave `ADMIN_TOKEN` unset (`vaultwarden:adminToken` blank in `cdk.json`,
+   the default). If the admin panel is ever needed, enable it via
+   `--context vaultwarden:adminToken=...` for one deployment and remove it
+   afterwards — see the 2FA lockout section below.
 5. Enable MFA on the AWS root account and do not use root for daily work.
 
 ### Two-factor authentication
@@ -282,13 +317,25 @@ reset paths do not exist. Two recovery routes:
 
 1. The **recovery code** Vaultwarden displays once at enrolment. Record it on
    paper, stored separately from the phone. This is the primary route.
-2. Infrastructure ownership. Redeploy with `ADMIN_TOKEN` temporarily set,
-   clear the 2FA entry through `/admin`, then deploy again without it. The
-   EFS database is also directly reachable from a one-off maintenance
-   function.
+2. Infrastructure ownership:
+   ```bash
+   npx cdk deploy --context vaultwarden:adminToken=<a-strong-random-value>
+   ```
+   deploys with `ADMIN_TOKEN` set (`lib/constructs/application.ts`,
+   `lib/vaultwarden-stack.ts`), which enables `/admin`. Log in there with the
+   token and clear the 2FA entry, then redeploy **without** the context flag
+   (or with `vaultwarden:adminToken` back to `""` in `cdk.json` if you put it
+   there instead of the CLI) to disable `/admin` again. This is a real
+   redeploy, not a config toggle a self-hoster without infrastructure access
+   could perform — that is what makes disabling the admin panel by default
+   safe here rather than reckless. Prefer passing the token on the command
+   line over committing it to `cdk.json`, and never leave a deployment with
+   `ADMIN_TOKEN` set longer than the recovery takes.
 
-Route 2 is what makes disabling the admin panel safe here rather than
-reckless. It is not available to a self-hoster without infrastructure access.
+The EFS database is also directly reachable in an emergency by invoking
+`vaultwarden-restore` with a snapshot from *before* the lockout (§7) — not a
+2FA-specific tool, but it is another route back to a working vault if the
+admin-token route is somehow unavailable.
 
 **Vault-stored TOTP seeds** (Bitwarden's built-in authenticator) are a
 separate feature. Vaultwarden grants premium status to all users by default,

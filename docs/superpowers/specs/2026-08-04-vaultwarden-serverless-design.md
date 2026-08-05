@@ -102,7 +102,7 @@ is not a consideration.
 | `lifecyclePolicy` | not set           | Infrequent Access is cheaper per GB but bills per access; at ~50 MB the saving is zero and the risk is not |
 | `performanceMode` | `GENERAL_PURPOSE` | Lowest latency                                                                                             |
 | `encrypted`       | `true`            | Free                                                                                                       |
-| `removalPolicy`   | `RETAIN`          | **Mandatory.** Without it `cdk destroy` deletes the vault                                                  |
+| `removalPolicy`   | `RETAIN`          | **Mandatory.** Without it `cdk destroy` deletes the vault. Retention alone is not enough to recover from a lost stack, though: see §8 |
 
 `efs.AccessPoint`: path `/vaultwarden`, POSIX uid/gid 1000, `createAcl` 0755.
 
@@ -288,6 +288,50 @@ all other principals; deny any request where `aws:SecureTransport` is false.
 
 The backup role gets EFS client access plus `s3:PutObject` on this bucket only.
 
+### 3.7 Restore — $0 (never invoked, never billed)
+
+A second Python 3.12 arm64 zip Lambda, `vaultwarden-restore`, built from the
+same `lambda/backup/` asset directory as the backup function (`restore.py`
+imports `validate_snapshot` from `index.py` rather than duplicating it) but with
+its own function, its own role, and no EventBridge schedule — it is invoked
+manually, by a human, never automatically.
+
+This exists because a restore procedure that cannot be executed is
+operationally identical to having no backup. Two things blocked it before this
+Lambda existed: the isolated VPC has no SSM/SSH path to a hand-launched EC2
+instance, and the EFS mount targets' security group admits only the
+application and backup functions' security groups, not an ad hoc instance's.
+A Lambda removes both problems at once — no shell is needed, and it gets EFS
+access the same way the other two functions do, via
+`fileSystem.connections.allowDefaultPortFrom`.
+
+Two actions, selected by the invocation payload:
+
+- `{"action": "list"}` — returns recent backup object keys, newest first, capped
+  at a sane limit, so the operator can choose one without S3 console access.
+- `{"action": "restore", "key": "...", "confirm": "OVERWRITE-VAULT"}` — performs
+  the restore, in this order: refuse unless `confirm` matches exactly; refuse
+  unless the application function's reserved concurrency is 0 (checked live via
+  `lambda:GetFunctionConcurrency`, bypassable with `"force": true` for the case
+  where the check itself is broken); download and decompress the snapshot to
+  `/tmp`; validate the *downloaded* snapshot with the same `validate_snapshot`
+  the nightly job uses, before anything at the live path is touched; copy the
+  current live database aside to a timestamped name; write the new database into
+  place atomically (temp file on the same EFS filesystem, then `os.replace`,
+  never a direct write to the live path).
+
+**IAM — read access, on a separate role from the write-only backup role.** The
+restore role gets EFS client access, `s3:GetObject` plus the listing action its
+`list` action needs (scoped to the backup bucket only), and
+`lambda:GetFunctionConcurrency` scoped to the application function's ARN only.
+This is a deliberate, narrow exception to §3.6's write-only design, not a
+weakening of it: the backup role itself is untouched and still cannot read or
+delete snapshots. The restore role can read them, but it is a different
+function, with a different role, invoked only by a human with their own AWS
+credentials — never by EventBridge, never automatically. A compromise of the
+backup role (the one thing actually exposed to a recurring, unattended
+schedule) still yields nothing beyond write access.
+
 ## 4. Cost model
 
 | Resource                                             | First 12 months       | Steady state      |
@@ -332,13 +376,16 @@ invocation of the function itself.
 | ------------------------- | ------------------------- | --------------------------------------------------------- |
 | `/identity/connect/token` | Master password guessing  | Rate limit (5 per 60 s), strong master password, TOTP 2FA |
 | `/api/accounts/register`  | Account creation          | `SIGNUPS_ALLOWED=false`                                   |
-| `/admin`                  | Admin panel               | **Route does not exist** — `ADMIN_TOKEN` unset            |
+| `/admin`                  | Admin panel               | **Route does not exist** by default — `ADMIN_TOKEN` unset. Enabled only via a deliberate `--context vaultwarden:adminToken=...` redeploy; see §5.5 |
 | `/alive`, `/api/config`   | Version and feature flags | Harmless                                                  |
 
 ### 5.3 What is unreachable
 
-- The SQLite file — only via the Lambda role's EFS client permission, inside the VPC.
-- The backup bucket — the policy names only the backup role.
+- The SQLite file — only via the application, backup, and restore functions'
+  EFS client permission, inside the VPC.
+- The backup bucket — write access is scoped to the backup role's own identity
+  policy only; read access is scoped to the restore role's own identity policy
+  only (§3.7). No other identity, and no unauthenticated request, can reach it.
 - Direct Lambda invocation — 403 without a CloudFront SigV4 signature.
 - The AWS account — no path from the Vaultwarden process.
 
@@ -353,8 +400,10 @@ server.
    everything, permanently.
 3. Enable TOTP two-factor authentication with a separate authenticator app, and
    store the recovery code offline. See §5.5.
-4. Leave `ADMIN_TOKEN` unset. If the admin panel is ever needed, enable it in a
-   temporary deployment and remove it afterwards.
+4. Leave `ADMIN_TOKEN` unset (`vaultwarden:adminToken` blank in `cdk.json`, the
+   default). If the admin panel is ever needed, enable it with
+   `--context vaultwarden:adminToken=...` for a temporary deployment and remove
+   it afterwards. See §5.5.
 5. Enable MFA on the AWS root account and do not use root for daily work.
 
 ### 5.5 Two-factor authentication
@@ -375,12 +424,18 @@ paths do not exist. Two recovery routes:
 
 1. The **recovery code** Vaultwarden displays once at enrolment. Record it on
    paper, stored separately from the phone. This is the primary route.
-2. Infrastructure ownership. Redeploy with `ADMIN_TOKEN` temporarily set, clear
-   the 2FA entry through `/admin`, then deploy again without it. The EFS database
-   is also directly reachable from a one-off maintenance function.
-
-Route 2 is what makes disabling the admin panel safe here rather than reckless.
-It is not available to a self-hoster without infrastructure access.
+2. Infrastructure ownership: `npx cdk deploy --context
+   vaultwarden:adminToken=<value>` deploys with `ADMIN_TOKEN` set (see the
+   `adminToken` prop on `ApplicationProps` in `lib/constructs/application.ts`,
+   wired from context in `lib/vaultwarden-stack.ts`), which enables `/admin`.
+   Clear the 2FA entry there, then redeploy without the context flag to disable
+   `/admin` again. This is a real redeploy — building and pushing a new Docker
+   image asset with a changed environment variable, then a CloudFormation
+   update — not a config toggle, which is what makes disabling the admin panel
+   safe by default rather than reckless: it is not available to a self-hoster
+   without infrastructure access. The `vaultwarden-restore` function (§3.7) is
+   also a route back to a working vault, from a snapshot taken before the
+   lockout, if the admin-token route is somehow unavailable.
 
 **Vault-stored TOTP seeds** (Bitwarden's built-in authenticator) are a separate
 feature. Vaultwarden grants premium status to all users by default, so it is
@@ -450,16 +505,40 @@ TOTP-based setup.
 
 ## 8. Restore procedure
 
-1. Download the desired object version from the backup bucket.
-2. `cdk deploy` the stack if the infrastructure is gone (EFS is `RETAIN`, so it
-   normally survives).
-3. Invoke a one-off restore path: gunzip the snapshot and write it to
-   `/mnt/data/db.sqlite3` with the application function stopped
-   (`reservedConcurrentExecutions: 0`).
-4. Restore concurrency to 1.
+Performed with the `vaultwarden-restore` Lambda described in §3.7, not a
+hand-launched EC2 instance — see that section for why an EC2-based procedure
+cannot actually be carried out in this VPC.
 
-This procedure must be tested once after the first deployment. An untested backup
-is not a backup.
+1. If the infrastructure itself is gone: `removalPolicy: RETAIN` (§3.2) stops
+   AWS deleting the EFS filesystem and the S3 bucket when the stack is
+   destroyed, but a fresh `cdk deploy` creates a **new**
+   `AWS::EFS::FileSystem` with a new physical ID — it does **not**
+   automatically re-attach to the orphaned one. Recovering the retained
+   filesystem requires an explicit `cdk import` of its physical ID into the
+   new stack before continuing. (The retained bucket has no equivalent
+   problem: a new bucket cannot reuse the old name, but the old bucket and its
+   contents remain directly reachable by name regardless of stack state.)
+2. Set the application function's reserved concurrency to 0
+   (`aws lambda put-function-concurrency --function-name vaultwarden
+   --reserved-concurrent-executions 0`), so Vaultwarden cannot be writing to
+   the database mid-restore.
+3. Invoke `vaultwarden-restore` with `{"action": "list"}` to see recent backup
+   keys, newest first.
+4. Invoke it again with
+   `{"action": "restore", "key": "<chosen key>", "confirm": "OVERWRITE-VAULT"}`.
+   The function independently re-verifies step 2 is done
+   (`lambda:GetFunctionConcurrency`, bypassable with `"force": true` only if
+   that check itself is broken), downloads and validates the snapshot before
+   touching the live database, preserves the current database under a
+   timestamped name, and swaps the new one into place atomically.
+5. Restore the application function's concurrency to 10 (not 1 — see §3.3 for
+   why 10 is the deployed value).
+
+This procedure must be tested once after the first deployment, using the
+`vaultwarden-restore` function exactly as it would be used in a real recovery.
+An untested backup is not a backup — and unlike the EC2-based version of this
+procedure this design started with, this one can actually be executed and
+therefore actually tested.
 
 ## 9. Repository layout
 
@@ -468,9 +547,10 @@ bin/vaultwarden.ts               CDK app entry point
 lib/vaultwarden-stack.ts         The single stack
 lib/constructs/storage.ts        VPC, EFS, access point, S3 bucket
 lib/constructs/application.ts    Container function, Function URL, CloudFront
-lib/constructs/backup.ts         Backup function, schedule, bucket policy
+lib/constructs/backup.ts         Backup function, schedule, restore function, IAM
 docker/vaultwarden/Dockerfile    Official image + Lambda Web Adapter
 lambda/backup/index.py           SQLite online backup to S3
+lambda/backup/restore.py         Manual restore: list/validate/preserve/replace
 cdk.json
 package.json
 ```

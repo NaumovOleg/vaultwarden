@@ -17,6 +17,15 @@ export interface ApplicationProps {
   readonly domain: string;
   /** Container image tag, e.g. "1.35.1-alpine". */
   readonly imageTag: string;
+  /**
+   * The 2FA-lockout escape hatch. Optional and empty by default (cdk.json ships
+   * vaultwarden:adminToken blank), mirroring alertEmail and imageTag: when unset
+   * or empty, ADMIN_TOKEN is entirely absent from the environment — exactly as
+   * before this prop existed — which is what disables /admin. Set it via
+   * `--context vaultwarden:adminToken=...`, deploy, clear the 2FA entry through
+   * /admin, then redeploy with it unset again. See README §10 and design spec §5.5.
+   */
+  readonly adminToken?: string;
 }
 
 const MOUNT_PATH = '/mnt/data';
@@ -33,6 +42,43 @@ export class Application extends Construct {
       retention: logs.RetentionDays.ONE_WEEK,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
+
+    const environment: Record<string, string> = {
+      DATA_FOLDER: MOUNT_PATH,
+      DATABASE_URL: `${MOUNT_PATH}/db.sqlite3`,
+      // Mandatory. Vaultwarden turns WAL on at startup by default; WAL
+      // coordinates readers through an mmap'd shared-memory file, which NFS
+      // does not provide, so the process aborts on EFS. Must be present from
+      // the first boot — one start without it writes WAL into the file.
+      ENABLE_DB_WAL: 'false',
+      DOMAIN: props.domain,
+      SIGNUPS_ALLOWED: 'false',
+      SIGNUPS_VERIFY: 'false',
+      INVITATIONS_ALLOWED: 'false',
+      // The function has no outbound internet, but an external icon
+      // service doesn't need it: Vaultwarden answers /icons/<domain>/icon.png
+      // with an HTTP redirect and never fetches the image itself — the
+      // client (browser extension, app, or web vault) fetches it directly
+      // from the provider. See the design spec's accepted-limitations
+      // section for the privacy trade-off this implies.
+      ICON_SERVICE: 'duckduckgo',
+      // Function URLs cannot carry WebSocket; clients fall back to polling.
+      WEBSOCKET_ENABLED: 'false',
+      // CloudFront sets X-Forwarded-For, not Vaultwarden's default
+      // X-Real-IP. Without this every request looks like one IP and the
+      // login rate limit becomes useless.
+      IP_HEADER: 'X-Forwarded-For',
+      LOGIN_RATELIMIT_SECONDS: '60',
+      LOGIN_RATELIMIT_MAX_BURST: '5',
+      ROCKET_PROFILE: 'release',
+      // ADMIN_TOKEN is deliberately absent by default: that is what disables
+      // /admin. Set only below, and only when props.adminToken is non-empty —
+      // see ApplicationProps.adminToken for the escape hatch this exists for.
+    };
+
+    if (props.adminToken) {
+      environment.ADMIN_TOKEN = props.adminToken;
+    }
 
     this.handler = new lambda.DockerImageFunction(this, 'Handler', {
       functionName: 'vaultwarden',
@@ -58,36 +104,7 @@ export class Application extends Construct {
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
       filesystem: lambda.FileSystem.fromEfsAccessPoint(props.accessPoint, MOUNT_PATH),
       logGroup,
-      environment: {
-        DATA_FOLDER: MOUNT_PATH,
-        DATABASE_URL: `${MOUNT_PATH}/db.sqlite3`,
-        // Mandatory. Vaultwarden turns WAL on at startup by default; WAL
-        // coordinates readers through an mmap'd shared-memory file, which NFS
-        // does not provide, so the process aborts on EFS. Must be present from
-        // the first boot — one start without it writes WAL into the file.
-        ENABLE_DB_WAL: 'false',
-        DOMAIN: props.domain,
-        SIGNUPS_ALLOWED: 'false',
-        SIGNUPS_VERIFY: 'false',
-        INVITATIONS_ALLOWED: 'false',
-        // The function has no outbound internet, but an external icon
-        // service doesn't need it: Vaultwarden answers /icons/<domain>/icon.png
-        // with an HTTP redirect and never fetches the image itself — the
-        // client (browser extension, app, or web vault) fetches it directly
-        // from the provider. See the design spec's accepted-limitations
-        // section for the privacy trade-off this implies.
-        ICON_SERVICE: 'duckduckgo',
-        // Function URLs cannot carry WebSocket; clients fall back to polling.
-        WEBSOCKET_ENABLED: 'false',
-        // CloudFront sets X-Forwarded-For, not Vaultwarden's default
-        // X-Real-IP. Without this every request looks like one IP and the
-        // login rate limit becomes useless.
-        IP_HEADER: 'X-Forwarded-For',
-        LOGIN_RATELIMIT_SECONDS: '60',
-        LOGIN_RATELIMIT_MAX_BURST: '5',
-        ROCKET_PROFILE: 'release',
-        // ADMIN_TOKEN is deliberately absent: that is what disables /admin.
-      },
+      environment,
     });
 
     props.fileSystem.connections.allowDefaultPortFrom(this.handler);

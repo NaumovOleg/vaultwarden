@@ -61,6 +61,23 @@ describe('Application function', () => {
     expect(appFunction(synth()).Properties.Environment.Variables).not.toHaveProperty('ADMIN_TOKEN');
   });
 
+  it('sets ADMIN_TOKEN only when the adminToken prop is supplied — the 2FA-lockout escape hatch', () => {
+    const app = new cdk.App();
+    const stack = new cdk.Stack(app, 'S', { env: { account: '111111111111', region: 'eu-west-1' } });
+    const storage = new Storage(stack, 'Storage');
+    new Application(stack, 'App', {
+      vpc: storage.vpc,
+      fileSystem: storage.fileSystem,
+      accessPoint: storage.accessPoint,
+      domain: 'https://example.cloudfront.net',
+      imageTag: '1.35.1-alpine',
+      adminToken: 'temporary-admin-token',
+    });
+    const t = Template.fromStack(stack);
+
+    expect(appFunction(t).Properties.Environment.Variables.ADMIN_TOKEN).toBe('temporary-admin-token');
+  });
+
   it('reads the client IP from the header CloudFront actually sets', () => {
     expect(appFunction(synth()).Properties.Environment.Variables.IP_HEADER).toBe('X-Forwarded-For');
   });

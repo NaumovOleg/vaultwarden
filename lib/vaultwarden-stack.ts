@@ -29,6 +29,10 @@ export class VaultwardenStack extends cdk.Stack {
 
     const domain = this.node.tryGetContext('vaultwarden:domain') ?? 'https://localhost';
     const imageTag = this.node.tryGetContext('vaultwarden:imageTag') ?? '1.35.1-alpine';
+    // The 2FA-lockout escape hatch (README §10). Blank by default in cdk.json;
+    // set via --context vaultwarden:adminToken=... for a temporary deployment,
+    // then redeploy without it.
+    const adminToken = this.node.tryGetContext('vaultwarden:adminToken');
 
     const application = new Application(this, 'Application', {
       vpc: storage.vpc,
@@ -36,6 +40,7 @@ export class VaultwardenStack extends cdk.Stack {
       accessPoint: storage.accessPoint,
       domain,
       imageTag,
+      adminToken,
     });
 
     new cdk.CfnOutput(this, 'CdnDomainName', {
