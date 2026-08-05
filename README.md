@@ -61,9 +61,16 @@ exist at all. Set it before the first deploy; see
 - **Node.js 24** and npm (the CDK app, `bin/vaultwarden.ts`, runs via
   `ts-node`; dependencies are `aws-cdk-lib` 2.263.0 and CDK CLI 2.1135.0, both
   pinned in `package.json`).
-- **AWS credentials** for the target account, with `CDK_DEFAULT_ACCOUNT` set to
-  that account's number (`bin/vaultwarden.ts` reads it via
-  `env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: 'eu-west-1' }`).
+- **AWS credentials** for the target account, plus the account number in the
+  environment. `bin/vaultwarden.ts` resolves it as
+  `DEFAULT_ACCOUNT ?? CDK_DEFAULT_ACCOUNT`, and the region as
+  `DEFAULT_REGION ?? CDK_DEFAULT_REGION ?? 'eu-west-1'`, so either variable
+  works. `dotenv` is loaded first, so a git-ignored `.env` holding
+  `DEFAULT_ACCOUNT` and `DEFAULT_REGION` is the tidiest option and keeps the
+  account number out of your shell history and out of the repository. The
+  region must never resolve to nothing: an environment-agnostic stack fails at
+  synth because EFS One Zone needs a concrete availability zone, and the error
+  does not mention the missing variable.
   Real, working credentials are required from the very first `cdk synth`, not
   just an account number: the VPC construct performs a live
   `DescribeAvailabilityZones` context lookup. That lookup's result is cached
