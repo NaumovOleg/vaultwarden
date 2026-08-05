@@ -217,7 +217,13 @@ $0 — a function that is never invoked is never billed.
    the wrong snapshot. If the concurrency check itself is broken and you are
    certain the application is stopped, add `"force": true` to the payload to
    bypass it. This is dangerous — it exists only so a broken check cannot
-   itself block an emergency restore, not as a routine option.
+   itself block an emergency restore, not as a routine option. It is also
+   dangerous in a second, quieter way: the preservation copy in step 3 is
+   only guaranteed to be a clean, consistent snapshot because the
+   concurrency check ran first. Under `force`, if Vaultwarden actually is
+   still writing, the preserved copy can itself be corrupt — do not treat it
+   as a reliable undo path when `force` was used; treat the restore as
+   one-way instead.
 4. Restore the application function's concurrency:
    ```bash
    aws lambda put-function-concurrency --function-name vaultwarden \
@@ -229,15 +235,59 @@ $0 — a function that is never invoked is never billed.
 
 **If the infrastructure itself is gone.** `removalPolicy: RETAIN`
 (`lib/constructs/storage.ts`) stops AWS from deleting the EFS filesystem and
-the S3 bucket when the stack is destroyed — but a fresh `cdk deploy` after a
-stack loss creates a **new** `AWS::EFS::FileSystem` with a new physical ID; it
-does **not** automatically re-attach to the orphaned one. Recovering the
-retained filesystem needs an explicit
+the S3 backup bucket when the stack is destroyed — but neither is
+automatically re-adopted by a fresh deploy. **Both** need an explicit
 [`cdk import`](https://docs.aws.amazon.com/cdk/v2/guide/cli.html#cli-import)
-of the existing filesystem's physical ID into the new stack before any of the
-steps above can run. The retained S3 bucket does not have this problem — a
-new bucket cannot reuse the same name, but the old bucket and its snapshots
-remain reachable directly by name regardless of stack state.
+before any of the steps above will work, and both need it for the same
+reason: `cdk deploy` after a stack loss creates a **new**
+`AWS::EFS::FileSystem` and a **new** `AWS::S3::Bucket`, each with a new
+physical ID/name, not a reattachment to the orphaned resource. The bucket has
+no explicit `bucketName` in `lib/constructs/storage.ts` specifically so a
+clean-account deploy never collides with a still-retained bucket from a
+previous stack — but that same lack of a fixed name is what makes the new
+bucket unrelated to the old one. `vaultwarden-restore`'s `BUCKET_NAME`
+environment variable is wired from `props.bucket.bucketName`
+(`lib/constructs/backup.ts`), i.e. whatever bucket exists in the **current**
+stack. Skip the import and the restore function is not broken — it works
+perfectly well against the new, empty bucket. `{"action": "list"}` will
+simply return an empty list, and every real snapshot will sit untouched in
+the orphaned bucket with no indication anything is wrong.
+
+So, in order, before relying on any of the numbered steps above after a full
+stack loss:
+
+1. `cdk import` the retained EFS filesystem's physical ID into the new stack.
+2. `cdk import` the retained S3 bucket's name into the new stack.
+3. Only then proceed with steps 1–4 above.
+
+**Out-of-band fallback, if you cannot or do not want to `cdk import` the
+bucket** (for example, to inspect what is there before deciding). This uses
+your own AWS credentials directly against S3, the same way the pre-Task-9
+procedure did, and is deliberately kept as the fallback rather than the
+primary route — `vaultwarden-restore` remains the normal way to restore,
+including its validation, preservation, and atomic-swap guarantees, none of
+which this fallback provides on its own:
+
+```bash
+# Find the orphaned bucket — it will not be the current BackupBucketName
+# stack output, since that now names the new stack's (empty) bucket.
+aws s3 ls | grep vaultwarden
+
+# List and download snapshots directly from it.
+aws s3 ls "s3://<orphaned-bucket-name>/db/" --region eu-west-1
+aws s3 cp "s3://<orphaned-bucket-name>/db/<snapshot>.gz" ./restore.sqlite3.gz \
+  --region eu-west-1
+gunzip restore.sqlite3.gz
+sqlite3 restore.sqlite3 "PRAGMA integrity_check;"   # must print: ok
+```
+
+This fallback only gets a validated snapshot into your own hands — it does
+not write it to EFS; `vaultwarden-restore` has no way to reach a bucket that
+is not the one named by its own `BUCKET_NAME` environment variable, and there
+is no supported way to hand it a local file instead of an S3 key. To finish
+the restore, `cdk import` the bucket (step 2 above) so the snapshot is
+visible to the current stack under its real key, then continue with the
+normal numbered procedure.
 
 ## 8. Upgrading Vaultwarden
 

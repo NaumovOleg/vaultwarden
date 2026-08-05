@@ -320,6 +320,16 @@ Two actions, selected by the invocation payload:
   place atomically (temp file on the same EFS filesystem, then `os.replace`,
   never a direct write to the live path).
 
+  The preservation copy is a plain file copy (`shutil.copy2`), not a
+  SQLite-online-backup-API snapshot the way the nightly job's is — safe in the
+  normal path specifically *because* the concurrency check just confirmed
+  nothing is writing to the source file. `"force": true` bypasses that same
+  check, so it also silently invalidates the assumption the plain copy relies
+  on: if Vaultwarden genuinely is still writing when `force` is used, the
+  preserved copy can itself be inconsistent. The live database is not at risk
+  either way — `atomic_replace`'s `os.replace` swap is unconditional — but the
+  preserved copy should not be trusted as an undo path for a `force`d restore.
+
 **IAM — read access, on a separate role from the write-only backup role.** The
 restore role gets EFS client access, `s3:GetObject` plus the listing action its
 `list` action needs (scoped to the backup bucket only), and
@@ -509,29 +519,47 @@ Performed with the `vaultwarden-restore` Lambda described in §3.7, not a
 hand-launched EC2 instance — see that section for why an EC2-based procedure
 cannot actually be carried out in this VPC.
 
-1. If the infrastructure itself is gone: `removalPolicy: RETAIN` (§3.2) stops
-   AWS deleting the EFS filesystem and the S3 bucket when the stack is
-   destroyed, but a fresh `cdk deploy` creates a **new**
-   `AWS::EFS::FileSystem` with a new physical ID — it does **not**
-   automatically re-attach to the orphaned one. Recovering the retained
-   filesystem requires an explicit `cdk import` of its physical ID into the
-   new stack before continuing. (The retained bucket has no equivalent
-   problem: a new bucket cannot reuse the old name, but the old bucket and its
-   contents remain directly reachable by name regardless of stack state.)
-2. Set the application function's reserved concurrency to 0
+**If the infrastructure itself is gone**, first: `removalPolicy: RETAIN`
+(§3.2) stops AWS deleting the EFS filesystem *and* the S3 bucket when the
+stack is destroyed, but neither is automatically re-adopted by a fresh
+deploy. A `cdk deploy` after stack loss creates a **new**
+`AWS::EFS::FileSystem` and a **new** `AWS::S3::Bucket`, each with a new
+physical ID/name, not a reattachment to the orphaned resource. The bucket has
+no explicit `bucketName` precisely so a clean-account deploy never collides
+with a still-retained bucket from a previous stack — but that same absence of
+a fixed name is what makes the new bucket unrelated to the old one.
+`vaultwarden-restore`'s `BUCKET_NAME` environment variable is wired from the
+bucket object in the *current* stack (`lib/constructs/backup.ts`), so
+skipping the import does not error: `{"action": "list"}` against the new,
+empty bucket just returns an empty list, while every real snapshot sits
+untouched in the orphaned bucket with nothing to indicate that. **Both
+resources need an explicit `cdk import` of their physical ID/name into the
+new stack before step 1 below** — or, if the bucket import is not yet done or
+wanted (e.g. to inspect what is there before deciding), use the out-of-band
+fallback: `aws s3 ls`/`aws s3 cp` directly against the orphaned bucket name
+(found via `aws s3 ls | grep vaultwarden`) with the operator's own
+credentials, the same access pattern the pre-restore-Lambda procedure used
+throughout. That fallback gets a validated snapshot file into the operator's
+hands but cannot get it onto EFS by itself — `vaultwarden-restore` only ever
+reads from the bucket named by its own `BUCKET_NAME`, so finishing the
+restore through it still requires importing the bucket.
+
+1. Set the application function's reserved concurrency to 0
    (`aws lambda put-function-concurrency --function-name vaultwarden
    --reserved-concurrent-executions 0`), so Vaultwarden cannot be writing to
    the database mid-restore.
-3. Invoke `vaultwarden-restore` with `{"action": "list"}` to see recent backup
+2. Invoke `vaultwarden-restore` with `{"action": "list"}` to see recent backup
    keys, newest first.
-4. Invoke it again with
+3. Invoke it again with
    `{"action": "restore", "key": "<chosen key>", "confirm": "OVERWRITE-VAULT"}`.
-   The function independently re-verifies step 2 is done
+   The function independently re-verifies step 1 is done
    (`lambda:GetFunctionConcurrency`, bypassable with `"force": true` only if
-   that check itself is broken), downloads and validates the snapshot before
+   that check itself is broken — but note that bypassing it also invalidates
+   the guarantee that the preserved copy of the outgoing database is itself
+   consistent; see §3.7), downloads and validates the snapshot before
    touching the live database, preserves the current database under a
    timestamped name, and swaps the new one into place atomically.
-5. Restore the application function's concurrency to 10 (not 1 — see §3.3 for
+4. Restore the application function's concurrency to 10 (not 1 — see §3.3 for
    why 10 is the deployed value).
 
 This procedure must be tested once after the first deployment, using the

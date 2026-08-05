@@ -85,7 +85,10 @@ def assert_application_stopped(lambda_client, function_name: str) -> None:
     to it. Callers may bypass this one check by passing {"force": true} in the
     restore event -- documented as dangerous in the README: it exists only so a
     broken concurrency check cannot itself block an emergency restore, not as a
-    routine option.
+    routine option. Bypassing it has a second, quieter cost too: execute_restore's
+    preserve_current_database step relies on this check having passed to assume its
+    plain file copy of the outgoing database is consistent -- see the comment at
+    that call site.
     """
     response = lambda_client.get_function_concurrency(FunctionName=function_name)
     reserved = response.get("ReservedConcurrentExecutions")
@@ -132,6 +135,12 @@ def preserve_current_database(db_path: str, now: datetime) -> str | None:
 
     This is the safety net for restoring the wrong backup: the database being
     replaced is never simply discarded, it is renamed-and-kept alongside it.
+
+    This is a plain file copy (shutil.copy2), not the SQLite online-backup API
+    index.py's snapshot_database uses for the nightly job. That is safe here only
+    because the caller (execute_restore) is expected to have already confirmed
+    nothing is writing to db_path -- see the comment at its call site below for the
+    one case (a "force"d restore) where that assumption does not hold.
     """
     if not os.path.exists(db_path):
         return None
@@ -197,6 +206,15 @@ def execute_restore(event: dict, s3_client, lambda_client) -> dict:
         # situation into an unrecoverable one.
         validate_snapshot(snapshot_path)
 
+        # preserve_current_database uses a plain file copy, which is only a
+        # guaranteed-consistent snapshot of DB_PATH because assert_application_stopped
+        # above (unless bypassed with "force") already established that nothing is
+        # writing to it. "force" skips that check entirely -- so a forced restore
+        # performed while Vaultwarden genuinely is still writing can produce a
+        # preserved copy that is itself torn/inconsistent, even though the live
+        # database ends up fine either way (atomic_replace's os.replace swap below is
+        # unconditional). Do not treat "preserved" as a reliable undo path when the
+        # restore was forced.
         preserved_path = preserve_current_database(DB_PATH, datetime.now(timezone.utc))
         bytes_written = atomic_replace(snapshot_path, DB_PATH)
 
