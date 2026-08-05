@@ -1,8 +1,10 @@
 import gzip
 import os
+import shutil
 import sqlite3
 from datetime import datetime, timezone
 
+import botocore.exceptions
 import pytest
 
 import index
@@ -52,6 +54,23 @@ class FakeLambdaClient:
         return {"ReservedConcurrentExecutions": self.reserved}
 
 
+class BlackHoledLambdaClient:
+    """Reproduces what the deployed function actually gets: the Lambda control
+    plane is not routable from a PRIVATE_ISOLATED subnet whose VPC has no NAT
+    gateway and only an S3 gateway endpoint, so botocore raises a connection
+    error rather than returning anything.
+    """
+
+    def __init__(self):
+        self.calls = []
+
+    def get_function_concurrency(self, FunctionName):
+        self.calls.append(FunctionName)
+        raise botocore.exceptions.EndpointConnectionError(
+            endpoint_url="https://lambda.eu-west-1.amazonaws.com/"
+        )
+
+
 def gzip_bytes(data: bytes) -> bytes:
     return gzip.compress(data)
 
@@ -86,6 +105,42 @@ def test_assert_application_stopped_rejects_nonzero_concurrency():
     lambda_client = FakeLambdaClient(reserved_concurrent_executions=10)
     with pytest.raises(restore.ApplicationNotStoppedError):
         restore.assert_application_stopped(lambda_client, "vaultwarden")
+
+
+def test_assert_application_stopped_reports_an_unreachable_control_plane_as_such(tmp_path):
+    """The deployed reality: this check cannot complete from an isolated subnet.
+    It must say so, in the payload the operator needs, instead of surfacing a raw
+    botocore traceback after a multi-minute hang.
+    """
+    lambda_client = BlackHoledLambdaClient()
+
+    with pytest.raises(restore.ConcurrencyCheckUnreachableError) as excinfo:
+        restore.assert_application_stopped(lambda_client, "vaultwarden")
+
+    message = str(excinfo.value)
+    # It must name the cause, the manual verification, and the way forward.
+    assert "isolated subnet" in message
+    assert "put-function-concurrency" in message
+    assert "get-function-concurrency" in message
+    assert '"force": true' in message
+    # Not silently swallowed into the generic "not stopped" error, which would
+    # send the operator looking for a concurrency setting that is already 0.
+    assert not isinstance(excinfo.value, restore.ApplicationNotStoppedError)
+
+
+def test_lambda_client_config_fails_fast_instead_of_hanging_on_a_black_holed_endpoint():
+    """Mechanism-level guard. A black-holed TCP connect does not get refused, it
+    gets no answer at all, so the only thing that bounds the wait is the client's
+    own timeout. botocore's defaults (60 s connect, retries) turn this into
+    minutes of silence during an emergency.
+    """
+    config = restore._LAMBDA_CLIENT_CONFIG
+
+    assert config.connect_timeout == 3
+    assert config.read_timeout == 3
+    # botocore's legacy retry mode reads this as a retry count, so it resolves to
+    # two attempts, ~6 s worst case -- versus the default 60 s x 5 = five minutes.
+    assert config.retries["max_attempts"] == 1
 
 
 # --- list_recent_backups ------------------------------------------------------
@@ -145,6 +200,113 @@ def test_preserve_current_database_copies_the_live_database_aside_intact(tmp_pat
     conn = sqlite3.connect(preserved_path)
     assert conn.execute("SELECT COUNT(*) FROM ciphers").fetchone()[0] == 100
     conn.close()
+
+
+def test_preserve_current_database_uses_the_sqlite_backup_api_not_a_raw_file_copy(
+    tmp_path, monkeypatch
+):
+    """Mechanism-level guard, the same spy style test_index.py uses for
+    snapshot_database: the preserved copy must be taken through SQLite's online
+    backup API, never a raw byte copy.
+
+    This is not a stylistic preference. The concurrency pre-check that would have
+    established "nothing is writing" cannot run from the deployed VPC at all (see
+    ConcurrencyCheckUnreachableError), so every real restore passes "force": true.
+    A byte copy would therefore never have the guarantee it depends on, and the
+    preserved database -- the entire undo path for restoring the wrong snapshot --
+    could be torn. The backup API needs no such guarantee.
+    """
+    live = str(tmp_path / "db.sqlite3")
+    make_db(live)
+
+    backup_calls = []
+
+    class SpyConnection(sqlite3.Connection):
+        def backup(self, *args, **kwargs):
+            backup_calls.append((args, kwargs))
+            return super().backup(*args, **kwargs)
+
+    original_connect = sqlite3.connect
+
+    def spy_connect(*args, **kwargs):
+        kwargs.setdefault("factory", SpyConnection)
+        return original_connect(*args, **kwargs)
+
+    copy_calls = []
+
+    def spy_copy2(*args, **kwargs):
+        copy_calls.append((args, kwargs))
+
+    monkeypatch.setattr(sqlite3, "connect", spy_connect)
+    monkeypatch.setattr(shutil, "copy2", spy_copy2)
+
+    preserved_path = restore.preserve_current_database(live, datetime.now(timezone.utc))
+
+    assert len(backup_calls) == 1
+    assert copy_calls == []
+    conn = sqlite3.connect(preserved_path)
+    assert conn.execute("SELECT COUNT(*) FROM ciphers").fetchone()[0] == 100
+    conn.close()
+
+
+def test_preserve_current_database_falls_back_to_a_raw_copy_when_the_live_file_is_not_a_database(
+    tmp_path,
+):
+    """A live database SQLite cannot open is one of the reasons to restore in the
+    first place. Preservation must not become the thing that blocks the restore;
+    the bytes are kept verbatim under a name that says they are not an undo path.
+    """
+    live = tmp_path / "db.sqlite3"
+    live.write_bytes(b"this is not a sqlite database at all")
+    now = datetime(2026, 8, 4, 3, 0, 0, tzinfo=timezone.utc)
+
+    preserved_path = restore.preserve_current_database(str(live), now)
+
+    assert preserved_path == f"{live}.preserved-raw-2026-08-04T03-00-00Z"
+    with open(preserved_path, "rb") as fh:
+        assert fh.read() == b"this is not a sqlite database at all"
+    # The failed online-backup attempt left no half-made file behind under the
+    # normal preserved name, which would otherwise look like a usable undo copy.
+    assert not os.path.exists(f"{live}.preserved-2026-08-04T03-00-00Z")
+
+
+# --- clear_sidecar_files ---------------------------------------------------------
+
+
+def test_clear_sidecar_files_moves_every_sidecar_out_of_the_way(tmp_path):
+    """A rollback journal is bound to a path, not to the database that wrote it.
+    Left in place, SQLite treats it as a hot journal belonging to whatever is at
+    that path now -- the freshly restored database -- and rolls stale pages into
+    it.
+    """
+    live = tmp_path / "db.sqlite3"
+    make_db(str(live))
+    for suffix in ("-journal", "-wal", "-shm"):
+        (tmp_path / f"db.sqlite3{suffix}").write_bytes(b"stale " + suffix.encode())
+    now = datetime(2026, 8, 4, 3, 0, 0, tzinfo=timezone.utc)
+
+    moved = restore.clear_sidecar_files(str(live), now)
+
+    for suffix in ("-journal", "-wal", "-shm"):
+        assert not os.path.exists(f"{live}{suffix}")
+    assert len(moved) == 3
+    # Kept for forensics rather than deleted...
+    for path in moved:
+        assert os.path.exists(path)
+    # ...but under names that are not themselves sidecar names. Moving the
+    # journal to "<preserved-copy>-journal" would just recreate the same hazard
+    # beside the preserved copy.
+    for path in moved:
+        for suffix in ("-journal", "-wal", "-shm"):
+            assert not path.endswith(suffix)
+
+
+def test_clear_sidecar_files_is_a_no_op_when_there_are_none(tmp_path):
+    live = tmp_path / "db.sqlite3"
+    make_db(str(live))
+
+    assert restore.clear_sidecar_files(str(live), datetime.now(timezone.utc)) == []
+    assert os.listdir(tmp_path) == ["db.sqlite3"]
 
 
 # --- atomic_replace -------------------------------------------------------------
@@ -361,6 +523,51 @@ def test_execute_restore_preserves_the_current_database_then_replaces_it_atomica
     preserved_conn.close()
 
     assert s3.download_calls == [("test-bucket", "db/good.sqlite3.gz", s3.download_calls[0][2])]
+
+
+def test_execute_restore_leaves_no_journal_beside_the_restored_database(tmp_path, monkeypatch):
+    """The corruption path this guards: with ENABLE_DB_WAL=false the database runs
+    in rollback-journal mode, so `db.sqlite3-journal` exists whenever a transaction
+    is in flight -- including when an execution environment is reclaimed mid-write,
+    which is exactly the kind of event that leads to a restore. A journal is not
+    bound to a particular database file. Left in place, SQLite finds it beside the
+    RESTORED database on the next open, treats it as a hot journal, and rolls those
+    stale pages into a database that validated as sound seconds earlier.
+    """
+    live = tmp_path / "db.sqlite3"
+    make_db(str(live))
+    journal = tmp_path / "db.sqlite3-journal"
+    journal.write_bytes(b"\x00" * 512)  # a leftover journal from the crashed writer
+    monkeypatch.setattr(restore, "DB_PATH", str(live))
+    monkeypatch.setattr(restore, "BUCKET_NAME", "test-bucket")
+
+    new_db = tmp_path / "new.sqlite3"
+    make_db(str(new_db))
+    with open(new_db, "rb") as fh:
+        archive_bytes = gzip_bytes(fh.read())
+
+    result = restore.execute_restore(
+        {
+            "action": "restore",
+            "key": "db/good.sqlite3.gz",
+            "confirm": "OVERWRITE-VAULT",
+            "force": True,
+        },
+        FakeS3Client(archive_bytes=archive_bytes),
+        FakeLambdaClient(reserved_concurrent_executions=0),
+    )
+
+    assert result["status"] == "ok"
+    assert not journal.exists()
+    # Moved aside for forensics, not deleted, and reported back to the operator.
+    assert len(result["stale_sidecars"]) == 1
+    moved = result["stale_sidecars"][0]
+    assert moved.startswith(f"{live}.stale-journal.")
+    assert os.path.exists(moved)
+    # The restored database opens cleanly, with no stale pages rolled into it.
+    conn = sqlite3.connect(str(live))
+    assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    conn.close()
 
 
 # --- handler dispatch (pure dispatch logic only; S3/Lambda paths are exercised

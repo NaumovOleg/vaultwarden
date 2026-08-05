@@ -1,4 +1,5 @@
 import gzip
+import json
 import os
 import shutil
 import sqlite3
@@ -204,6 +205,34 @@ def test_snapshot_reads_through_wal_content_as_a_general_regression_guard(tmp_pa
     conn = sqlite3.connect(dest)
     assert conn.execute("SELECT COUNT(*) FROM ciphers").fetchone()[0] == 101
     conn.close()
+
+
+def test_emit_snapshot_size_metric_writes_one_parseable_emf_line(capsys):
+    """The size metric is the only signal that distinguishes a backup of the real
+    vault from a backup of a valid-but-empty freshly-migrated database, which
+    passes every check validate_snapshot makes. It has to actually be a metric --
+    a plain log line cannot be alarmed on -- so this asserts the Embedded Metric
+    Format envelope CloudWatch Logs looks for, not just that something was logged.
+    """
+    now = datetime(2026, 8, 4, 3, 0, 0, tzinfo=timezone.utc)
+
+    record = index.emit_snapshot_size_metric(53248, 8192, "db/2026-08-04T03-00-00Z.sqlite3.gz", now)
+
+    printed = json.loads(capsys.readouterr().out.strip())
+    assert printed == record
+
+    directive = printed["_aws"]["CloudWatchMetrics"][0]
+    assert directive["Namespace"] == "Vaultwarden"
+    assert directive["Metrics"] == [{"Name": "SnapshotBytes", "Unit": "Bytes"}]
+    # The metric's value must be a top-level property with the same name, or
+    # CloudWatch silently ingests the log line and publishes nothing.
+    assert printed["SnapshotBytes"] == 53248
+    assert printed["_aws"]["Timestamp"] == int(now.timestamp() * 1000)
+
+    # Compressed size travels along as context but is deliberately NOT a second
+    # billable custom metric.
+    assert printed["compressedBytes"] == 8192
+    assert [m["Name"] for m in directive["Metrics"]] == ["SnapshotBytes"]
 
 
 def test_handler_skips_when_the_database_does_not_exist_yet(tmp_path, monkeypatch):

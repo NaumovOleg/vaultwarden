@@ -6,6 +6,7 @@ produces a consistent snapshot without stopping writers.
 """
 
 import gzip
+import json
 import os
 import shutil
 import sqlite3
@@ -13,6 +14,8 @@ import tempfile
 from datetime import datetime, timezone
 
 import boto3
+
+METRIC_NAMESPACE = "Vaultwarden"
 
 DB_PATH = os.environ.get("DB_PATH", "/mnt/data/db.sqlite3")
 BUCKET_NAME = os.environ.get("BUCKET_NAME", "")
@@ -75,6 +78,52 @@ def compress(src_path: str, dest_path: str) -> int:
     return os.path.getsize(dest_path)
 
 
+def emit_snapshot_size_metric(raw_size: int, gz_size: int, key: str, now: datetime) -> dict:
+    """Emit the snapshot's uncompressed byte size as a CloudWatch metric, and
+    return the log record that carries it.
+
+    This closes the one hole validate_snapshot structurally cannot: a
+    freshly-migrated Vaultwarden database -- the state after anything that swaps
+    the EFS filesystem, or after an erroneous restore -- has a complete schema and
+    zero users, so it passes both `PRAGMA integrity_check` and the non-empty
+    `sqlite_master` check. Ninety nightly uploads later, every snapshot that
+    contained the real vault has expired under the bucket's lifecycle rule, and
+    nothing anywhere reported a problem.
+
+    Checking for Vaultwarden's own table names would catch it, but that couples
+    this job to upstream's schema and turns a Vaultwarden upgrade into a silent
+    backup outage -- the same class of failure it would be trying to prevent. Size
+    is the schema-agnostic proxy: an empty vault is a few tens of KB, a real one
+    is not, and a real one does not shrink. This function only publishes the
+    number; no alarm is created here, because a threshold picked at deploy time --
+    before any data exists -- would be pure noise. README §7 documents how to add
+    one once the vault's normal size is known.
+
+    Uses CloudWatch Embedded Metric Format: a single structured line on stdout
+    that the Logs agent extracts into a metric. No new AWS resources, and one
+    custom metric sits inside the always-free 10.
+    """
+    record = {
+        "_aws": {
+            "Timestamp": int(now.timestamp() * 1000),
+            "CloudWatchMetrics": [{
+                "Namespace": METRIC_NAMESPACE,
+                # No dimensions: one vault, one metric. Dimensions would multiply
+                # the custom-metric count for no added signal.
+                "Dimensions": [[]],
+                "Metrics": [{"Name": "SnapshotBytes", "Unit": "Bytes"}],
+            }],
+        },
+        "SnapshotBytes": raw_size,
+        # Deliberately a plain property, not a second metric: useful context when
+        # reading the log, but not worth another billable custom metric.
+        "compressedBytes": gz_size,
+        "key": key,
+    }
+    print(json.dumps(record))
+    return record
+
+
 def backup_key(now: datetime) -> str:
     """S3 key for a backup taken at `now`. Lexical order matches chronological order."""
     return f"db/{now.strftime('%Y-%m-%dT%H-%M-%SZ')}.sqlite3.gz"
@@ -85,7 +134,8 @@ def handler(event, context):  # noqa: ARG001 - Lambda signature
         # Expected between stack creation and first login.
         return {"status": "skipped", "reason": "database does not exist yet"}
 
-    key = backup_key(datetime.now(timezone.utc))
+    now = datetime.now(timezone.utc)
+    key = backup_key(now)
 
     # Lambda gives every invocation 512 MB of writable /tmp at no cost.
     with tempfile.TemporaryDirectory() as workdir:
@@ -96,5 +146,10 @@ def handler(event, context):  # noqa: ARG001 - Lambda signature
         validate_snapshot(snapshot)
         gz_size = compress(snapshot, archive)
         _s3.upload_file(archive, BUCKET_NAME, key)
+
+    # After the upload, so the metric only ever describes a snapshot that is
+    # actually in the bucket. See the function's docstring for what this catches
+    # that validate_snapshot cannot.
+    emit_snapshot_size_metric(raw_size, gz_size, key, now)
 
     return {"status": "ok", "key": key, "bytes": raw_size, "compressed": gz_size}

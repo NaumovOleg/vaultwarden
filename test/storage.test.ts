@@ -35,6 +35,20 @@ describe('Storage', () => {
     });
   });
 
+  // CreateFileSystem's automatic-backup default is false EXCEPT when
+  // AvailabilityZoneName is set — which oneZone: true does — so One Zone
+  // silently enrols the vault filesystem in daily AWS Backup jobs: an
+  // unbudgeted recurring charge, running exactly the mid-write file copy the
+  // design spec (§3.6) rejects as producing an unusable database. Passing
+  // `enableAutomaticBackups: false` to the L2 does nothing (2.263.0 maps it to
+  // `props.enableAutomaticBackups ? {status:'ENABLED'} : undefined`), hence the
+  // L1 escape hatch this asserts.
+  it('explicitly disables AWS Backup, which One Zone would otherwise turn on', () => {
+    synth().hasResourceProperties('AWS::EFS::FileSystem', {
+      BackupPolicy: { Status: 'DISABLED' },
+    });
+  });
+
   it('sets no lifecycle policy, so no per-access Infrequent Access charges', () => {
     synth().hasResourceProperties('AWS::EFS::FileSystem', {
       LifecyclePolicies: Match.absent(),

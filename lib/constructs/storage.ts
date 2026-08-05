@@ -88,6 +88,28 @@ export class Storage extends Construct {
       }),
     });
 
+    // AWS Backup on EFS is deliberately not used (design spec §3.6): it copies
+    // the file in whatever state it finds it, so a snapshot taken mid-write
+    // produces an unusable database. The nightly SQLite online backup to S3 is
+    // the backup story here, and AWS Backup would additionally be an unbudgeted
+    // recurring charge against a ~$0.18/month stack.
+    //
+    // It has to be turned off explicitly, and it has to be done through an
+    // escape hatch, for two separate reasons:
+    //
+    //  1. CreateFileSystem's automatic-backup default is `false` *except* when
+    //     AvailabilityZoneName is specified — which oneZone: true does. So the
+    //     One Zone storage class silently opts this filesystem in.
+    //  2. aws-cdk-lib 2.263.0 maps the L2 prop as
+    //     `props.enableAutomaticBackups ? { status: 'ENABLED' } : undefined`,
+    //     so passing `enableAutomaticBackups: false` emits nothing at all and
+    //     leaves the inverted service-side default in force.
+    //
+    // Setting BackupPolicy on the L1 is the only way to actually say DISABLED.
+    (this.fileSystem.node.defaultChild as efs.CfnFileSystem).backupPolicy = {
+      status: 'DISABLED',
+    };
+
     this.accessPoint = this.fileSystem.addAccessPoint('DataAccessPoint', {
       path: '/vaultwarden',
       createAcl: { ownerUid: '1000', ownerGid: '1000', permissions: '0755' },
