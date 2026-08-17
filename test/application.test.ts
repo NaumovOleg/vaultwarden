@@ -174,18 +174,20 @@ describe('Application function', () => {
 });
 
 describe('Public entry point', () => {
-  it('requires SigV4 on the Function URL so it cannot be invoked directly', () => {
-    synth().hasResourceProperties('AWS::Lambda::Url', { AuthType: 'AWS_IAM' });
+  it('routes through a Function URL that accepts browser POST bodies', () => {
+    synth().hasResourceProperties('AWS::Lambda::Url', {
+      AuthType: 'NONE',
+      InvokeMode: 'RESPONSE_STREAM',
+    });
   });
 
-  it('signs origin requests with an Origin Access Control', () => {
+  it('streams: the web vault ships assets past the 6 MB buffered cap', () => {
     const t = synth();
-    t.resourceCountIs('AWS::CloudFront::OriginAccessControl', 1);
-    t.hasResourceProperties('AWS::CloudFront::OriginAccessControl', {
-      OriginAccessControlConfig: Match.objectLike({
-        OriginAccessControlOriginType: 'lambda',
-        SigningBehavior: 'always',
-        SigningProtocol: 'sigv4',
+    t.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: Match.objectLike({
+        Variables: Match.objectLike({
+          AWS_LWA_INVOKE_MODE: 'RESPONSE_STREAM',
+        }),
       }),
     });
   });
@@ -202,7 +204,7 @@ describe('Public entry point', () => {
     });
   });
 
-  it('does not forward the viewer Host header, which would break the signature', () => {
+  it('does not forward the viewer Host header', () => {
     synth().hasResourceProperties('AWS::CloudFront::Distribution', {
       DistributionConfig: Match.objectLike({
         DefaultCacheBehavior: Match.objectLike({

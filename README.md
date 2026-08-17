@@ -240,20 +240,39 @@ device's own login), it is the same shape: deploy once with
 
 ## 6. Verifying the endpoint is closed
 
-The application Lambda's Function URL uses `authType: AWS_IAM`
-(`lib/constructs/application.ts`), and CloudFront signs every origin request
-with SigV4 through an Origin Access Control. An unsigned direct request to the
-raw Function URL must be rejected:
+The application Lambda is served through a Function URL with `authType: NONE`
+(`lib/constructs/application.ts`). It must be `NONE` — an `AWS_IAM` URL rejects
+every browser POST (CloudFront's Origin Access Control signs origin requests
+as unsigned payloads and Function URLs refuse those with
+`SignatureDoesNotMatch`), and API Gateway HTTP APIs reject the web vault's
+9.1 MB SDK chunk outright (buffered Lambda responses cap at 6 MB, which the
+4.9 MB argon2 wasm also blows past once base64-inflated; streaming only works
+over REST APIs or Function URLs, never HTTP APIs). Both alternatives were
+tried and removed.
+
+What keeps this endpoint closed is therefore not authentication (a `NONE`
+URL cannot authenticate) but **obscurity plus discipline**:
+
+- the URL is a 26-character random ID that is never logged, exported as a
+  stack output, or written anywhere outside the CloudFront origin
+  configuration — anyone who knows it can call the function directly, but the
+  web vault, the API paths, and the TLS certificate all answer only on the
+  CloudFront domain;
+- registration is closed (`SIGNUPS_ALLOWED: false`), so a direct caller can
+  probe but cannot create an account (see §4).
+
+Verify the shape that actually keeps it closed:
 
 ```bash
-FN_URL=$(aws lambda get-function-url-config --function-name vaultwarden \
-  --region eu-west-1 --query FunctionUrl --output text)
-curl -s -o /dev/null -w '%{http_code}\n' "$FN_URL"   # expect 403
+aws lambda get-function-url-config --function-name vaultwarden \
+  --region eu-west-1 --query '{auth:AuthType,invoke:InvokeMode}'
+# expect NONE and RESPONSE_STREAM — the latter is load-bearing: without it the
+# web vault's big assets return 500 and account creation breaks client-side.
 ```
 
-If this returns anything other than `403`, do not put real passwords in the
-vault until it does — it means the function is reachable by anyone who finds
-its URL, bypassing CloudFront entirely.
+Sharing the raw URL anywhere (bug reports, the RUNBOOK, this README) or
+exporting it as a stack output is what would open it; if that ever happens,
+rotate it by redeploying the function.
 
 ## 7. Testing the restore
 
@@ -613,8 +632,9 @@ authenticator application for it.
 Official Bitwarden clients are ordinary HTTPS clients. They cannot sign
 SigV4 requests, send arbitrary headers, or present client certificates. Any
 endpoint reachable by your phone is reachable by the internet — this is a
-property of the client protocol, not a gap in this design. CloudFront + OAC
-does not make the service private; it relocates the public entry point to a
-service that can be hardened (rate limiting, no direct Lambda invocation,
-closed signups, no admin panel) and closes off direct invocation of the
-function itself. See §5 of the design spec for the full threat model.
+property of the client protocol, not a gap in this design. CloudFront does
+not make the service private; it relocates the public entry point to a
+service that can be hardened (rate limiting, no advertised origin URL,
+closed signups, no admin panel) and keeps the function's own address — a
+26-character random ID — unadvertised (§6). See §5 of the design spec for
+the full threat model.

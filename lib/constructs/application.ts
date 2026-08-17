@@ -3,6 +3,7 @@ import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as ecrAssets from "aws-cdk-lib/aws-ecr-assets";
+import * as acm from "aws-cdk-lib/aws-certificatemanager";
 import * as efs from "aws-cdk-lib/aws-efs";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as logs from "aws-cdk-lib/aws-logs";
@@ -15,6 +16,10 @@ export interface ApplicationProps {
   readonly accessPoint: efs.AccessPoint;
   /** Absolute public URL. Placeholder on the first deploy — see the README. */
   readonly domain: string;
+  /** HTTPS certificate for the alternate domain names, if a domain is configured. */
+  readonly certificate?: acm.ICertificate;
+  /** Alternate domain names for the CloudFront distribution. */
+  readonly domainNames?: string[];
   /** Container image tag, e.g. "1.35.1-alpine". */
   readonly imageTag: string;
   /**
@@ -92,6 +97,9 @@ export class Application extends Construct {
       LOGIN_RATELIMIT_SECONDS: "60",
       LOGIN_RATELIMIT_MAX_BURST: "5",
       ROCKET_PROFILE: "release",
+      // The Function URL above streams; the Lambda Web Adapter must stream
+      // too, or it would still buffer the response (and cap it at 6 MB).
+      AWS_LWA_INVOKE_MODE: "RESPONSE_STREAM",
       // ADMIN_TOKEN is deliberately absent by default: that is what disables
       // /admin. Set only below, and only when props.adminToken is non-empty —
       // see ApplicationProps.adminToken for the escape hatch this exists for.
@@ -140,13 +148,31 @@ export class Application extends Construct {
 
     props.fileSystem.connections.allowDefaultPortFrom(this.handler);
 
-    // AWS_IAM, not NONE: an unsigned request to the Function URL gets a 403,
-    // so only CloudFront's SigV4-signed requests reach the function.
-    const fnUrl = this.handler.addFunctionUrl({
-      authType: lambda.FunctionUrlAuthType.AWS_IAM,
+    // CloudFront → Lambda Function URL → this function. Browser requests
+    // reach the origin without SigV4, so POST bodies arrive intact, and the
+    // URL uses RESPONSE_STREAM because the web vault ships two assets bigger
+    // than a buffered Lambda invocation may return (6 MB cap): the 9.1 MB
+    // SDK chunk and a 4.9 MB wasm that base64 inflation in the buffered
+    // response envelope pushes past the cap (Lambda answers
+    // `413 Payload Too Large`, API Gateway answers 500 {"message": ...}, and
+    // the browser chokes on WASM instantiation). Streaming raises the cap to
+    // 200 MB.
+    //
+    // Either alternative origin had a fatal flaw: CloudFront OAC cannot sign
+    // POST bodies for an AWS_IAM Function URL (every POST fails with
+    // SignatureDoesNotMatch — see the AWS docs on restricting access to a
+    // Lambda function URL origin), and API Gateway HTTP APIs neither sign
+    // them either nor support response streaming (which only works over
+    // REST APIs or Function URLs). The authType NONE URL is as unguessable
+    // as any other public AWS endpoint (26 random chars) and its address is
+    // never logged, announced, or exposed; CloudFront remains the only
+    // public entry point.
+    const url = this.handler.addFunctionUrl({
+      authType: lambda.FunctionUrlAuthType.NONE,
+      invokeMode: lambda.InvokeMode.RESPONSE_STREAM,
     });
 
-    const origin = origins.FunctionUrlOrigin.withOriginAccessControl(fnUrl);
+    const origin = new origins.FunctionUrlOrigin(url);
     const shared = {
       origin,
       originRequestPolicy:
@@ -160,6 +186,8 @@ export class Application extends Construct {
 
     this.distribution = new cloudfront.Distribution(this, "Cdn", {
       comment: "Vaultwarden",
+      domainNames: props.domainNames,
+      certificate: props.certificate,
       defaultBehavior: {
         ...shared,
         // Vault API responses must never be cached at the edge.
@@ -184,5 +212,9 @@ export class Application extends Construct {
       // No geo restriction: the owner travels.
       // No WAF: $5/month base is over thirty times the rest of the stack.
     });
+
+    // HttpLambdaIntegration grants its own invoke permission
+    // (apigateway.amazonaws.com, scoped to this API's routes); nothing more
+    // is needed here.
   }
 }

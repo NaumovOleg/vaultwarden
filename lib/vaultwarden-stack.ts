@@ -1,4 +1,5 @@
 import * as cdk from 'aws-cdk-lib';
+import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import { Construct } from 'constructs';
 import { Application } from './constructs/application';
 import { Backup } from './constructs/backup';
@@ -44,6 +45,15 @@ export class VaultwardenStack extends cdk.Stack {
     }
 
     const domain = this.node.tryGetContext('vaultwarden:domain') ?? 'https://localhost';
+    // ACM certificate for the custom domain, referenced from us-east-1 (the
+    // region CloudFront requires for alternate names). Imported by ARN rather
+    // than issued here: issuance is a manual DNS-validation step in another
+    // region. See cdk.json.
+    const certificateArn = this.node.tryGetContext('vaultwarden:certificateArn');
+    const certificate = certificateArn
+      ? acm.Certificate.fromCertificateArn(this, 'DomainCertificate', certificateArn)
+      : undefined;
+    const domainNames = certificate ? [new URL(domain).hostname] : undefined;
     const imageTag = this.node.tryGetContext('vaultwarden:imageTag') ?? '1.35.1-alpine';
     // The 2FA-lockout escape hatch (README §10). Blank by default in cdk.json;
     // set via --context vaultwarden:adminToken=... for a temporary deployment,
@@ -62,6 +72,8 @@ export class VaultwardenStack extends cdk.Stack {
       fileSystem: storage.fileSystem,
       accessPoint: storage.accessPoint,
       domain,
+      certificate,
+      domainNames,
       imageTag,
       adminToken,
       signupsAllowed,
