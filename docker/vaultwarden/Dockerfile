@@ -5,7 +5,7 @@
 # ARG must be declared before FROM to be usable in it. The default lets a bare
 # `docker build` still work; the CDK asset build overrides it via --build-arg
 # from Application's `imageTag` prop.
-ARG VW_TAG=1.35.1-alpine
+ARG VW_TAG=1.37.1-alpine
 FROM vaultwarden/server:${VW_TAG}
 
 # The adapter runs as a Lambda external extension and proxies invocations to the

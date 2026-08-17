@@ -20,7 +20,7 @@ export interface ApplicationProps {
   readonly certificate?: acm.ICertificate;
   /** Alternate domain names for the CloudFront distribution. */
   readonly domainNames?: string[];
-  /** Container image tag, e.g. "1.35.1-alpine". */
+  /** Container image tag, e.g. "1.37.1-alpine". */
   readonly imageTag: string;
   /**
    * The 2FA-lockout escape hatch. Optional and empty by default (cdk.json ships
@@ -37,7 +37,7 @@ export interface ApplicationProps {
    * register an account on it.
    *
    * It exists as a prop because with it hardcoded to `'false'` the owner
-   * account could never be created at all. Vaultwarden 1.35.1 admits a
+   * account could never be created at all. Vaultwarden 1.37.1 admits a
    * registration only when `Invitation::take(&email, ..) ||
    * CONFIG.is_signup_allowed(&email)` (`src/api/core/accounts.rs`); there is no
    * first-user bootstrap exception. With no `ADMIN_TOKEN` (so no `/admin` to

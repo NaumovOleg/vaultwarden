@@ -149,7 +149,7 @@ npx cdk deploy --context vaultwarden:signupsAllowed=true
 npx cdk deploy
 ```
 
-**Why the first pass has to allow signups.** Vaultwarden 1.35.1 accepts a
+**Why the first pass has to allow signups.** Vaultwarden 1.37.1 accepts a
 registration only when `Invitation::take(&email, …) ||
 CONFIG.is_signup_allowed(&email)` (`src/api/core/accounts.rs`). There is no
 "first user is special" exception. This stack has no `ADMIN_TOKEN` (so no

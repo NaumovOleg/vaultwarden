@@ -54,7 +54,7 @@ export class VaultwardenStack extends cdk.Stack {
       ? acm.Certificate.fromCertificateArn(this, 'DomainCertificate', certificateArn)
       : undefined;
     const domainNames = certificate ? [new URL(domain).hostname] : undefined;
-    const imageTag = this.node.tryGetContext('vaultwarden:imageTag') ?? '1.35.1-alpine';
+    const imageTag = this.node.tryGetContext('vaultwarden:imageTag') ?? '1.37.1-alpine';
     // The 2FA-lockout escape hatch (README §10). Blank by default in cdk.json;
     // set via --context vaultwarden:adminToken=... for a temporary deployment,
     // then redeploy without it.

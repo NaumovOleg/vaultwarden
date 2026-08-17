@@ -4,7 +4,7 @@
     "vaultwarden:domain": "https://vaultwarden.free-bert.online",
     "vaultwarden:certificateArn": "arn:aws:acm:us-east-1:602101700579:certificate/99ae63cd-58a2-463a-bc50-68fe4557a0f7",
     "vaultwarden:alertEmail": "",
-    "vaultwarden:imageTag": "1.35.1-alpine",
+    "vaultwarden:imageTag": "1.37.1-alpine",
     "vaultwarden:adminToken": "",
     "vaultwarden:signupsAllowed": "false",
     "@aws-cdk/core:newStyleStackSynthesis": true
