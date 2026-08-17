@@ -1,9 +1,9 @@
 # STATE.md — Project Memory
 
 ## Current Position
-- **Phase:** 0 (New project setup)
-- **Next:** `/gsd:plan-phase 1` (Serverless Skeleton)
-- **Completed:** PROJECT.md, config, research (4 reports), FEATURES.md, REQUIREMENTS.md, ROADMAP.md
+- **Phase:** 1 (Serverless Skeleton) — planned, not executed
+- **Next:** `/gsd:execute-phase 1` — 3 plans, 3 waves (01 infra → 02 endpoints → 03 webvault+deploy)
+- **Completed:** PROJECT.md, config, research (4 reports), FEATURES.md, REQUIREMENTS.md, ROADMAP.md, phase-1 plans (3)
 
 ## Project Facts
 - Full custom Bitwarden-compatible server: Node 22 Lambda + DynamoDB + S3, CDK v2 rewrite
