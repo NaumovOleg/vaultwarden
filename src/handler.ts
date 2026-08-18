@@ -27,19 +27,62 @@ import {
   cipherPurge,
   cipherBulkDelete,
   cipherImport,
+  attachmentCreateV2,
+  attachmentUpload,
+  attachmentLegacy,
+  attachmentGet,
+  attachmentDeleteHandler,
 } from './endpoints/ciphers';
+import {
+  sendList,
+  sendGet,
+  sendCreate,
+  sendUpdate,
+  sendDelete,
+  sendRemovePassword,
+  sendFileV2,
+  sendFileUpload,
+  sendAccess,
+  sendFileDownload,
+} from './endpoints/sends';
+import {
+  orgCreate,
+  orgGet,
+  orgUpdate,
+  orgSetKeys,
+  orgGetKeys,
+  orgPublicKey,
+  orgDelete,
+  orgLeave,
+} from './endpoints/organizations';
+import {
+  collectionListAll,
+  collectionListForOrg,
+  collectionGet,
+  collectionCreate,
+  collectionUpdate,
+  collectionDelete,
+} from './endpoints/collections';
 import { BitwardenError, internalError, notFound, toErrorBody } from './errors';
 import { match, Route, RouteContext } from './router';
 import { Store, MemoryStore } from './store';
+import { MemoryObjectStore, S3ObjectStore, type ObjectStore } from './objects';
 import { authenticate } from './auth';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' };
 
 export interface Deps {
   store: Store;
+  objects?: ObjectStore;
 }
 
-const defaultDeps: Deps = { store: new MemoryStore() };
+function defaultObjects(): ObjectStore {
+  return process.env.ATTACHMENTS_BUCKET
+    ? new S3ObjectStore(process.env.ATTACHMENTS_BUCKET)
+    : new MemoryObjectStore();
+}
+
+const defaultDeps: Deps = { store: new MemoryStore(), objects: defaultObjects() };
 
 const defaultRoutes: Route[] = [
   { method: 'GET', pattern: '/alive', handler: alive },
@@ -83,6 +126,43 @@ const defaultRoutes: Route[] = [
   { method: 'POST', pattern: '/api/ciphers/move', handler: cipherMove, auth: true },
   { method: 'POST', pattern: '/api/ciphers/purge', handler: cipherPurge, auth: true },
   { method: 'POST', pattern: '/api/ciphers/import', handler: cipherImport, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/:cipherId/attachment/v2', handler: attachmentCreateV2, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/:cipherId/attachment/:attachmentId', handler: attachmentUpload, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/:cipherId/attachment', handler: attachmentLegacy, auth: true },
+  { method: 'GET', pattern: '/api/ciphers/:cipherId/attachment/:attachmentId', handler: attachmentGet, auth: true },
+  { method: 'DELETE', pattern: '/api/ciphers/:cipherId/attachment/:attachmentId', handler: attachmentDeleteHandler, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/:cipherId/attachment/:attachmentId/delete', handler: attachmentDeleteHandler, auth: true },
+  { method: 'DELETE', pattern: '/api/ciphers/:cipherId/attachment/:attachmentId/delete', handler: attachmentDeleteHandler, auth: true },
+  { method: 'GET', pattern: '/api/sends', handler: sendList, auth: true },
+  { method: 'GET', pattern: '/api/sends/:id', handler: sendGet, auth: true },
+  { method: 'POST', pattern: '/api/sends', handler: sendCreate, auth: true },
+  { method: 'PUT', pattern: '/api/sends/:id', handler: sendUpdate, auth: true },
+  { method: 'DELETE', pattern: '/api/sends/:id', handler: sendDelete, auth: true },
+  { method: 'POST', pattern: '/api/sends/:id/delete', handler: sendDelete, auth: true },
+  { method: 'PUT', pattern: '/api/sends/:id/remove-password', handler: sendRemovePassword, auth: true },
+  { method: 'POST', pattern: '/api/sends/file/v2', handler: sendFileV2, auth: true },
+  { method: 'POST', pattern: '/api/sends/:id/file/:fileId', handler: sendFileUpload, auth: true },
+  { method: 'POST', pattern: '/api/sends/access/:accessId', handler: sendAccess },
+  { method: 'GET', pattern: '/api/sends/:accessId/file/:fileId', handler: sendFileDownload },
+  { method: 'POST', pattern: '/api/organizations', handler: orgCreate, auth: true },
+  { method: 'GET', pattern: '/api/organizations/:id', handler: orgGet, auth: true },
+  { method: 'PUT', pattern: '/api/organizations/:id', handler: orgUpdate, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id', handler: orgUpdate, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/keys', handler: orgSetKeys, auth: true },
+  { method: 'GET', pattern: '/api/organizations/:id/keys', handler: orgGetKeys, auth: true },
+  { method: 'GET', pattern: '/api/organizations/:id/public-key', handler: orgPublicKey, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/delete', handler: orgDelete, auth: true },
+  { method: 'DELETE', pattern: '/api/organizations/:id', handler: orgDelete, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/leave', handler: orgLeave, auth: true },
+  { method: 'GET', pattern: '/api/collections', handler: collectionListAll, auth: true },
+  { method: 'GET', pattern: '/api/organizations/:id/collections', handler: collectionListForOrg, auth: true },
+  { method: 'GET', pattern: '/api/organizations/:id/collections/details', handler: collectionListForOrg, auth: true },
+  { method: 'GET', pattern: '/api/organizations/:id/collections/:collectionId/details', handler: collectionGet, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/collections', handler: collectionCreate, auth: true },
+  { method: 'PUT', pattern: '/api/organizations/:id/collections/:collectionId', handler: collectionUpdate, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/collections/:collectionId', handler: collectionUpdate, auth: true },
+  { method: 'DELETE', pattern: '/api/organizations/:id/collections/:collectionId', handler: collectionDelete, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/collections/:collectionId/delete', handler: collectionDelete, auth: true },
   { method: 'POST', pattern: '/api/ciphers/delete', handler: cipherBulkDelete, auth: true },
   { method: 'PUT', pattern: '/api/ciphers/delete', handler: cipherBulkDelete, auth: true },
   { method: 'GET', pattern: '/api/folders', handler: folderList, auth: true },
@@ -109,9 +189,10 @@ function json(statusCode: number, body: string): APIGatewayProxyResult {
 
 // One-shot body parsing: identity endpoints send form-urlencoded, the rest of
 // the API sends JSON. base64 decoding applies to whichever it is.
-function parseBody(event: APIGatewayProxyEventV2): Omit<RouteContext, 'store'> {
+function parseBody(event: APIGatewayProxyEventV2): Omit<RouteContext, 'store' | 'objects'> {
   const raw = event.body ?? '';
-  const decoded = event.isBase64Encoded ? Buffer.from(raw, 'base64').toString('utf-8') : raw;
+  const bytes = event.isBase64Encoded ? Buffer.from(raw, 'base64') : Buffer.from(raw, 'utf-8');
+  const decoded = bytes.toString('utf-8');
   const rawHeaders = event.headers ?? {};
   const headers: Record<string, string> = {};
   for (const [k, v] of Object.entries(rawHeaders)) headers[k.toLowerCase()] = v ?? '';
@@ -135,6 +216,7 @@ function parseBody(event: APIGatewayProxyEventV2): Omit<RouteContext, 'store'> {
   }
   return {
     bodyRaw: decoded,
+    bodyBytes: bytes,
     bodyForm: form,
     bodyJson: jsonBody,
     headers,
@@ -154,7 +236,7 @@ export function createHandler(routes: Route[], deps: Deps = defaultDeps) {
       if (!route) {
         result = json(notFound().status, toErrorBody(notFound()));
       } else {
-        const ctx: RouteContext = { ...parseBody(event), store: deps.store };
+        const ctx: RouteContext = { ...parseBody(event), store: deps.store, objects: deps.objects ?? defaultObjects() };
         if (route.auth) {
           const authn = await authenticate(deps.store, ctx);
           if (!authn) {

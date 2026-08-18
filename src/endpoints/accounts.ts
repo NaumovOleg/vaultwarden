@@ -2,6 +2,9 @@ import type { RouteContext } from '../router';
 import type { UserItem } from '../store';
 import { cipherJson } from './ciphers';
 import { folderJson } from './folders';
+import { sendJson } from './sends';
+import { orgJson } from './organizations';
+import { collectionJson } from './collections';
 import { newUuid, hashPassword } from '../crypto';
 import { verifyClientHash } from '../auth';
 import { BitwardenError } from '../errors';
@@ -9,12 +12,22 @@ import { jsonValue, normalizeKdf } from './identity';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' };
 
+async function userOrgsJson(ctx: RouteContext) {
+  const memberships = await ctx.store.listOrganizationsForUser(ctx.user!.id);
+  const out: Record<string, unknown>[] = [];
+  for (const m of memberships) {
+    const org = await ctx.store.getOrganization(m.orgId);
+    if (org) out.push(orgJson(org, m));
+  }
+  return out;
+}
+
 function json(statusCode: number, body: unknown) {
   return { statusCode, headers: JSON_HEADERS, body: JSON.stringify(body) };
 }
 
 // Shared profile serializer — used by GET /api/accounts/profile and /api/sync.
-function profileJson(user: UserItem) {
+function profileJson(user: UserItem, orgs: Record<string, unknown>[] = []) {
   const keyPair =
     user.privateKey === null && user.publicKey === null
       ? null
@@ -35,7 +48,7 @@ function profileJson(user: UserItem) {
     key: user.akey,
     privateKey: user.privateKey,
     securityStamp: user.securityStamp,
-    organizations: [],
+    organizations: orgs,
     providers: [],
     providerOrganizations: [],
     forcePasswordReset: false,
@@ -80,7 +93,7 @@ function userDecryptionJson(user: UserItem) {
 
 // GET /api/accounts/profile
 export async function profile(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
-  return json(200, profileJson(ctx.user!));
+  return json(200, profileJson(ctx.user!, await userOrgsJson(ctx)));
 }
 
 // GET /api/accounts/revision-date — ms epoch (pitfall 2.2)
@@ -116,9 +129,10 @@ export async function sync(params: Record<string, string>, ctx: RouteContext): P
 
   const folders = await ctx.store.listFolders(user.id);
   const foldersJson = folders.map(folderJson);
+  const orgsJson = await userOrgsJson(ctx);
 
   const bundle: Record<string, unknown> = {
-    profile: profileJson(user),
+    profile: profileJson(user, orgsJson),
     folders: foldersJson,
     object: 'sync',
   };
@@ -126,13 +140,15 @@ export async function sync(params: Record<string, string>, ctx: RouteContext): P
   if (partial) return json(200, bundle);
 
   const ciphers = await ctx.store.listCiphers(user.id);
+  const sends = await ctx.store.listSends(user.id);
+  const collections = await ctx.store.listCollectionsForUser(user.id);
   return json(200, {
     ...bundle,
-    collections: [],
+    collections: collections.map((c) => collectionJson(c)),
     policies: [],
-    ciphers: ciphers.map((c) => cipherJson(c, 'cipherDetails')),
+    ciphers: await Promise.all(ciphers.map((c) => cipherJson(c, 'cipherDetails', ctx.objects))),
     domains: excludeDomains ? null : domainsJson(),
-    sends: [],
+    sends: sends.map(sendJson),
     userDecryption: userDecryptionJson(user),
   });
 }
@@ -240,6 +256,12 @@ export async function verifyPassword(params: Record<string, string>, ctx: RouteC
 export async function deleteAccount(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
   const user = ctx.user!;
   requirePassword(ctx.bodyJson as Record<string, unknown>, user);
+  for (const cipher of await ctx.store.listCiphers(user.id)) {
+    await ctx.objects.deletePrefix(`attachments/${cipher.id}/`);
+  }
+  for (const send of await ctx.store.listSends(user.id)) {
+    if (send.type === 1) await ctx.objects.deletePrefix(`sends/${send.id}/`);
+  }
   await ctx.store.deleteUser(user.id);
   return jwtJson(200, {});
 }
@@ -256,5 +278,5 @@ export async function updateProfile(params: Record<string, string>, ctx: RouteCo
     revisionDateMs: Date.now(),
   };
   await ctx.store.putUser(updated);
-  return jwtJson(200, profileJson(updated));
+  return jwtJson(200, profileJson(updated, await userOrgsJson(ctx)));
 }

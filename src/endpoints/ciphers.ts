@@ -2,6 +2,8 @@ import { newUuid } from '../crypto';
 import { BitwardenError } from '../errors';
 import type { RouteContext } from '../router';
 import type { CipherItem } from '../store';
+import type { ObjectStore } from '../objects';
+import { parseBodyBytes } from './multipart';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' };
 
@@ -13,9 +15,34 @@ function notFoundErr() {
   return new BitwardenError(404, 'Not found.');
 }
 
+// Human bytes, e.g. "4.5 MB" (vaultwarden size_name).
+function sizeName(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let unit = 'B';
+  for (const u of units) {
+    if (value < 1024) break;
+    value /= 1024;
+    unit = u;
+  }
+  return `${value >= 100 ? Math.round(value) : Math.round(value * 10) / 10} ${unit}`;
+}
+
 // Canonical serializer (pitfall 1.5: type payload strictly separated, never
 // folded; explicit nulls — pitfall 2.5). Encrypted strings relayed verbatim.
-function cipherJson(item: CipherItem, object: 'cipher' | 'cipherDetails') {
+// Attachments serialize with a fresh 5-min presigned url; trashed items get
+// blank urls (restore re-arms them on next read).
+async function cipherJson(item: CipherItem, object: 'cipher' | 'cipherDetails', objects: ObjectStore) {
+  const attachments =
+    item.attachments && item.attachments.length > 0
+      ? await Promise.all(
+          item.attachments.map(async (a) => ({
+            ...a,
+            url: item.deletedDate === null ? await objects.presignedGetUrl(`attachments/${item.id}/${a.id}`) : '',
+          })),
+        )
+      : null;
   return {
     object,
     id: item.id,
@@ -26,7 +53,8 @@ function cipherJson(item: CipherItem, object: 'cipher' | 'cipherDetails') {
     reprompt: item.reprompt,
     organizationId: item.organizationId,
     key: item.key,
-    attachments: null,
+    attachments,
+    attachmentCount: item.attachments?.length ?? 0,
     organizationUseTotp: true,
     collectionIds: [],
     name: item.name,
@@ -101,13 +129,14 @@ function normalizeCreate(body: Record<string, any>): Omit<CipherItem, 'pk' | 'sk
         }))
       : null,
     passwordHistory: Array.isArray(body.passwordHistory) ? body.passwordHistory : null,
+    attachments: null,
   };
 }
 
 // GET /api/ciphers — non-deleted only
 export async function cipherList(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
   const all = await ctx.store.listCiphers(ctx.user!.id);
-  const data = all.filter((c) => c.deletedDate === null).map((c) => cipherJson(c, 'cipherDetails'));
+  const data = await Promise.all(all.filter((c) => c.deletedDate === null).map((c) => cipherJson(c, 'cipherDetails', ctx.objects)));
   return json(200, { object: 'list', data, continuationToken: null });
 }
 
@@ -115,7 +144,7 @@ export async function cipherList(params: Record<string, string>, ctx: RouteConte
 export async function cipherGet(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
   const item = await ctx.store.getCipher(ctx.user!.id, params.cipherId);
   if (!item) throw notFoundErr();
-  return json(200, cipherJson(item, 'cipherDetails'));
+  return json(200, await cipherJson(item, 'cipherDetails', ctx.objects));
 }
 
 // POST /api/ciphers + /api/ciphers/create
@@ -132,7 +161,7 @@ export async function cipherCreate(params: Record<string, string>, ctx: RouteCon
     revisionDate: now,
   };
   await ctx.store.putCipher(item);
-  return json(200, cipherJson(item, 'cipher'));
+  return json(200, await cipherJson(item, 'cipher', ctx.objects));
 }
 
 // PUT|POST /api/ciphers/{id} — full replace
@@ -149,7 +178,7 @@ export async function cipherUpdate(params: Record<string, string>, ctx: RouteCon
     revisionDate: new Date().toISOString(),
   };
   await ctx.store.putCipher(item);
-  return json(200, cipherJson(item, 'cipher'));
+  return json(200, await cipherJson(item, 'cipher', ctx.objects));
 }
 
 // PUT|POST /api/ciphers/{id}/partial — merge login fields only (extension autofill)
@@ -179,7 +208,7 @@ export async function cipherPartial(params: Record<string, string>, ctx: RouteCo
     revisionDate: new Date().toISOString(),
   };
   await ctx.store.putCipher(updated);
-  return json(200, cipherJson(updated, 'cipher'));
+  return json(200, await cipherJson(updated, 'cipher', ctx.objects));
 }
 
 // DELETE|POST|PUT /api/ciphers/{id} (+ /delete) — soft delete
@@ -223,11 +252,14 @@ export async function cipherMove(params: Record<string, string>, ctx: RouteConte
   return json(200, {});
 }
 
-// POST /api/ciphers/purge — permanent delete of trash rows
+// POST /api/ciphers/purge — permanent delete of trash rows (S3 objects cascade)
 export async function cipherPurge(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
   const ids: unknown[] = ctx.bodyJson.ids ?? [];
   for (const id of ids) {
-    if (typeof id === 'string') await ctx.store.deleteCipher(ctx.user!.id, id);
+    if (typeof id === 'string') {
+      await ctx.objects.deletePrefix(`attachments/${id}/`);
+      await ctx.store.deleteCipher(ctx.user!.id, id);
+    }
   }
   return json(200, {});
 }
@@ -244,6 +276,146 @@ export async function cipherBulkDelete(params: Record<string, string>, ctx: Rout
 // POST /api/ciphers/import — {folders: [{name}], ciphers: [cipher objects],
 // folderRelationships: [[folderIdx, cipherIdx]]}. Duplicates allowed (matches
 // vaultwarden). Folder by index; missing index → null folderId.
+// Max decodable upload bytes: Lambda invoke cap is 6 MB, API GW base64
+// overhead cuts usable file size to ≈4.5 MB (ARCHITECTURE §4.1).
+const MAX_UPLOAD_BYTES = 4.5 * 1024 * 1024;
+
+function badBody(message: string): BitwardenError {
+  return new BitwardenError(400, message);
+}
+
+// POST /api/ciphers/{cipherId}/attachment/v2 — {key, fileName, fileSize?}
+// → {object:'attachment-fileUpload', attachmentId, url, fileUploadType:0, cipherResponse}.
+export async function attachmentCreateV2(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const user = ctx.user!;
+  const item = await ctx.store.getCipher(user.id, params.cipherId);
+  if (!item) throw notFoundErr();
+  const body = ctx.bodyJson;
+  const fileName = typeof body.fileName === 'string' ? body.fileName : '';
+  const key = typeof body.key === 'string' ? body.key : '';
+  if (fileName === '' || key === '') throw badBody('Missing fileName or key.');
+  const attachmentId = newUuid();
+  const size = typeof body.fileSize === 'number' ? body.fileSize : 0;
+  const updated: CipherItem = {
+    ...item,
+    attachments: [
+      ...(item.attachments ?? []),
+      { id: attachmentId, url: '', fileName, key, size, sizeName: sizeName(size), object: 'attachment' },
+    ],
+    revisionDate: new Date().toISOString(),
+  };
+  await ctx.store.putCipher(updated);
+  return json(200, {
+    object: 'attachment-fileUpload',
+    attachmentId,
+    url: `/api/ciphers/${item.id}/attachment/${attachmentId}`,
+    fileUploadType: 0,
+    cipherResponse: await cipherJson(updated, 'cipherDetails', ctx.objects),
+  });
+}
+
+// POST /api/ciphers/{cipherId}/attachment/{attachmentId} — multipart {key, data}.
+async function storeUpload(ctx: RouteContext, item: CipherItem, attachmentId: string): Promise<CipherItem> {
+  const fields = parseBodyBytes(ctx.headers['content-type'] ?? '', ctx.bodyBytes);
+  const data = fields.get('data');
+  const key = fields.get('key')?.toString('utf-8');
+  if (!data) throw badBody('Missing data field.');
+  if (data.length > MAX_UPLOAD_BYTES) {
+    throw new BitwardenError(413, 'Attachment exceeds the 4.5 MB limit.');
+  }
+  const existing = item.attachments?.find((a) => a.id === attachmentId);
+  if (!existing) throw notFoundErr();
+  const updated: CipherItem = {
+    ...item,
+    attachments: (item.attachments ?? []).map((a) =>
+      a.id === attachmentId
+        ? { ...a, size: data.length, sizeName: sizeName(data.length), key: key ?? a.key }
+        : a,
+    ),
+    revisionDate: new Date().toISOString(),
+  };
+  await ctx.objects.putObject(`attachments/${item.id}/${attachmentId}`, data);
+  await ctx.store.putCipher(updated);
+  return updated;
+}
+
+export async function attachmentUpload(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const item = await ctx.store.getCipher(ctx.user!.id, params.cipherId);
+  if (!item) throw notFoundErr();
+  const updated = await storeUpload(ctx, item, params.attachmentId);
+  return json(200, await cipherJson(updated, 'cipherDetails', ctx.objects));
+}
+
+// Legacy single-call: POST /api/ciphers/{cipherId}/attachment (multipart
+// {key, data, fileName}) — create meta + upload in one call.
+export async function attachmentLegacy(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const item = await ctx.store.getCipher(ctx.user!.id, params.cipherId);
+  if (!item) throw notFoundErr();
+  const fields = parseBodyBytes(ctx.headers['content-type'] ?? '', ctx.bodyBytes);
+  const fileName = fields.get('fileName')?.toString('utf-8') ?? '';
+  const key = fields.get('key')?.toString('utf-8') ?? '';
+  const data = fields.get('data');
+  if (!data) throw badBody('Missing data field.');
+  if (data.length > MAX_UPLOAD_BYTES) {
+    throw new BitwardenError(413, 'Attachment exceeds the 4.5 MB limit.');
+  }
+  const attachmentId = newUuid();
+  const updated: CipherItem = {
+    ...item,
+    attachments: [
+      ...(item.attachments ?? []),
+      {
+        id: attachmentId,
+        url: '',
+        fileName,
+        key,
+        size: data.length,
+        sizeName: sizeName(data.length),
+        object: 'attachment',
+      },
+    ],
+    revisionDate: new Date().toISOString(),
+  };
+  await ctx.objects.putObject(`attachments/${item.id}/${attachmentId}`, data);
+  await ctx.store.putCipher(updated);
+  return json(200, await cipherJson(updated, 'cipherDetails', ctx.objects));
+}
+
+// GET /api/ciphers/{cipherId}/attachment/{attachmentId} — {object:'attachment',
+// id, url (fresh presigned), fileName, key, size, sizeName}.
+export async function attachmentGet(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const item = await ctx.store.getCipher(ctx.user!.id, params.cipherId);
+  const att = item?.attachments?.find((a) => a.id === params.attachmentId);
+  if (!item || !att) throw notFoundErr();
+  return json(200, {
+    object: 'attachment',
+    id: att.id,
+    url: await ctx.objects.presignedGetUrl(`attachments/${item.id}/${att.id}`),
+    fileName: att.fileName,
+    key: att.key,
+    size: att.size,
+    sizeName: att.sizeName,
+  });
+}
+
+// DELETE|POST|PUT /api/ciphers/{cipherId}/attachment/{attachmentId} (+ /delete)
+async function attachmentDelete(ctx: RouteContext, cipherId: string, attachmentId: string): Promise<unknown> {
+  const item = await ctx.store.getCipher(ctx.user!.id, cipherId);
+  if (!item || !item.attachments?.some((a) => a.id === attachmentId)) throw notFoundErr();
+  const updated: CipherItem = {
+    ...item,
+    attachments: item.attachments.filter((a) => a.id !== attachmentId),
+    revisionDate: new Date().toISOString(),
+  };
+  await ctx.objects.deleteObject(`attachments/${item.id}/${attachmentId}`);
+  await ctx.store.putCipher(updated);
+  return json(200, await cipherJson(updated, 'cipherDetails', ctx.objects));
+}
+
+export async function attachmentDeleteHandler(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  return attachmentDelete(ctx, params.cipherId, params.attachmentId);
+}
+
 export async function cipherImport(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
   const user = ctx.user!;
   const body = ctx.bodyJson;
@@ -290,4 +462,4 @@ export async function cipherImport(params: Record<string, string>, ctx: RouteCon
   return json(200, {});
 }
 
-export { cipherJson };
+export { cipherJson, sizeName };

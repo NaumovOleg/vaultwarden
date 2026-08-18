@@ -83,6 +83,16 @@ export interface LoginData {
   fido2Credentials: unknown[] | null;
 }
 
+export interface AttachmentItem {
+  id: string; // uuid, foreign to cipher id
+  url: string; // filled at serialize time (presigned, 5 min)
+  fileName: string; // encrypted
+  key: string; // encrypted
+  size: number;
+  sizeName: string;
+  object: 'attachment';
+}
+
 export interface CipherItem {
   pk: string; // CIPHER#{userId}#{cipherId}
   sk: string; // CIPHER
@@ -108,6 +118,7 @@ export interface CipherItem {
   passport: Record<string, unknown> | null;
   fields: { name: string | null; value: string | null; type: number; linkedId: number | null }[] | null;
   passwordHistory: unknown[] | null;
+  attachments: AttachmentItem[] | null;
 }
 
 export interface FolderItem {
@@ -115,6 +126,71 @@ export interface FolderItem {
   sk: string; // FOLDER
   id: string;
   name: string;
+  revisionDate: string;
+}
+
+export interface SendItem {
+  pk: string; // SEND#{userId}#{sendId}
+  sk: string; // SEND
+  id: string;
+  accessId: string; // 10-char uuid-derived hex, the anonymous handle
+  type: number; // 0=text, 1=file
+  name: string; // encrypted
+  notes: string | null;
+  text: { text: string; hidden: boolean } | null; // encrypted
+  file: { id: string; fileName: string; size: number; sizeName: string; key: string } | null;
+  passwordHash: string | null; // client SHA-256 base64 of send password
+  maxAccessCount: number | null;
+  accessCount: number;
+  expirationDate: string | null;
+  deletionDate: string | null;
+  disabled: boolean;
+  hideEmail: boolean;
+  revisionDate: string;
+}
+
+// Status: 0=invited, 1=accepted, 2=confirmed. Type: 0=owner, 1=admin, 2=user, 3=manager.
+export interface OrgUserItem {
+  pk: string; // ORGUSER#{orgId}#{userId}
+  sk: string; // ORGUSER
+  orgId: string;
+  userId: string;
+  email: string;
+  status: number;
+  type: number;
+  accessToken: string | null; // invite token (no-email accept, phase 5 plan 02)
+  revisionDate: string;
+}
+
+export interface OrganizationItem {
+  pk: string; // ORG#{orgId}
+  sk: string; // ORG
+  id: string;
+  name: string;
+  billingEmail: string;
+  key: string; // encrypted org key, relayed verbatim
+  keys: { publicKey: string; privateKey: string };
+  createdAt: string;
+  revisionDate: string;
+}
+
+export interface CollectionUserRef {
+  id: string;
+  readOnly: boolean;
+  hidePasswords: boolean;
+}
+
+export interface CollectionItem {
+  pk: string; // COLLECTION#{orgId}#{collectionId}
+  sk: string; // COLLECTION
+  id: string;
+  organizationId: string;
+  name: string;
+  externalId: string | null;
+  hidePasswords: boolean;
+  readOnly: boolean;
+  manage: boolean;
+  users: CollectionUserRef[];
   revisionDate: string;
 }
 
@@ -146,6 +222,24 @@ export interface Store {
   getFolder(userId: string, folderId: string): Promise<FolderItem | null>;
   listFolders(userId: string): Promise<FolderItem[]>;
   deleteFolder(userId: string, folderId: string): Promise<void>;
+  putSend(send: SendItem): Promise<void>;
+  getSend(userId: string, sendId: string): Promise<SendItem | null>;
+  listSends(userId: string): Promise<SendItem[]>;
+  deleteSend(userId: string, sendId: string): Promise<void>;
+  findSendByAccessId(accessId: string): Promise<SendItem | null>;
+  putOrganization(org: OrganizationItem): Promise<void>;
+  getOrganization(orgId: string): Promise<OrganizationItem | null>;
+  deleteOrganization(orgId: string): Promise<void>;
+  putOrgUser(member: OrgUserItem): Promise<void>;
+  getOrgUser(orgId: string, userId: string): Promise<OrgUserItem | null>;
+  listOrgUsers(orgId: string): Promise<OrgUserItem[]>;
+  listOrganizationsForUser(userId: string): Promise<OrgUserItem[]>;
+  deleteOrgUser(orgId: string, userId: string): Promise<void>;
+  putCollection(col: CollectionItem): Promise<void>;
+  getCollection(orgId: string, collectionId: string): Promise<CollectionItem | null>;
+  listCollectionsForOrg(orgId: string): Promise<CollectionItem[]>;
+  listCollectionsForUser(userId: string): Promise<CollectionItem[]>;
+  deleteCollection(orgId: string, collectionId: string): Promise<void>;
 }
 
 const TABLE = process.env.VAULT_TABLE ?? '';
@@ -274,6 +368,9 @@ export class DynamoStore implements Store {
     }
     await deleteRows(`CIPHER#${userId}#`, 'CIPHER');
     await deleteRows(`FOLDER#${userId}#`, 'FOLDER');
+    await deleteRows(`SEND#${userId}#`, 'SEND');
+    const memberships = await this.listOrganizationsForUser(userId);
+    for (const m of memberships) await this.deleteOrgUser(m.orgId, userId);
   }
 
   async putTwoFactorToken(item: TwoFactorItem): Promise<void> {
@@ -375,6 +472,152 @@ export class DynamoStore implements Store {
     }));
   }
 
+  async listSends(userId: string): Promise<SendItem[]> {
+    const res = await this.db.send(new QueryCommand({
+      TableName: this.table,
+      KeyConditionExpression: 'begins_with(pk, :pk) AND sk = :sk',
+      ExpressionAttributeValues: { ':pk': `SEND#${userId}#`, ':sk': 'SEND' },
+    }));
+    return (res.Items as SendItem[] | undefined) ?? [];
+  }
+
+  async putSend(send: SendItem): Promise<void> {
+    await this.db.send(new PutCommand({
+      TableName: this.table,
+      Item: { ...send, GSI1PK: `SENDACCESS#${send.accessId}`, GSI1SK: 'SEND' },
+    }));
+  }
+
+  async getSend(userId: string, sendId: string): Promise<SendItem | null> {
+    const res = await this.db.send(new GetCommand({
+      TableName: this.table,
+      Key: { pk: `SEND#${userId}#${sendId}`, sk: 'SEND' },
+    }));
+    return (res.Item as SendItem | undefined) ?? null;
+  }
+
+  async findSendByAccessId(accessId: string): Promise<SendItem | null> {
+    const res = await this.db.send(new QueryCommand({
+      TableName: this.table,
+      IndexName: 'GSI1',
+      KeyConditionExpression: 'GSI1PK = :pk',
+      ExpressionAttributeValues: { ':pk': `SENDACCESS#${accessId}` },
+      Limit: 1,
+    }));
+    return (res.Items?.[0] as SendItem | undefined) ?? null;
+  }
+
+  async deleteSend(userId: string, sendId: string): Promise<void> {
+    await this.db.send(new DeleteCommand({
+      TableName: this.table,
+      Key: { pk: `SEND#${userId}#${sendId}`, sk: 'SEND' },
+    }));
+  }
+
+  async putOrganization(org: OrganizationItem): Promise<void> {
+    await this.db.send(new PutCommand({ TableName: this.table, Item: org }));
+  }
+
+  async getOrganization(orgId: string): Promise<OrganizationItem | null> {
+    const res = await this.db.send(new GetCommand({
+      TableName: this.table,
+      Key: { pk: `ORG#${orgId}`, sk: 'ORG' },
+    }));
+    return (res.Item as OrganizationItem | undefined) ?? null;
+  }
+
+  async deleteOrganization(orgId: string): Promise<void> {
+    await this.db.send(new DeleteCommand({
+      TableName: this.table,
+      Key: { pk: `ORG#${orgId}`, sk: 'ORG' },
+    }));
+    const members = await this.listOrgUsers(orgId);
+    for (const m of members) await this.deleteOrgUser(orgId, m.userId);
+  }
+
+  async putOrgUser(member: OrgUserItem): Promise<void> {
+    await this.db.send(new PutCommand({
+      TableName: this.table,
+      Item: { ...member, GSI1PK: `USERORGS#${member.userId}`, GSI1SK: 'ORGUSER' },
+    }));
+  }
+
+  async getOrgUser(orgId: string, userId: string): Promise<OrgUserItem | null> {
+    const res = await this.db.send(new GetCommand({
+      TableName: this.table,
+      Key: { pk: `ORGUSER#${orgId}#${userId}`, sk: 'ORGUSER' },
+    }));
+    return (res.Item as OrgUserItem | undefined) ?? null;
+  }
+
+  async listOrgUsers(orgId: string): Promise<OrgUserItem[]> {
+    const res = await this.db.send(new QueryCommand({
+      TableName: this.table,
+      KeyConditionExpression: 'begins_with(pk, :pk) AND sk = :sk',
+      ExpressionAttributeValues: { ':pk': `ORGUSER#${orgId}#`, ':sk': 'ORGUSER' },
+    }));
+    return (res.Items as OrgUserItem[] | undefined) ?? [];
+  }
+
+  async listOrganizationsForUser(userId: string): Promise<OrgUserItem[]> {
+    const res = await this.db.send(new QueryCommand({
+      TableName: this.table,
+      IndexName: 'GSI1',
+      KeyConditionExpression: 'GSI1PK = :pk AND GSI1SK = :sk',
+      ExpressionAttributeValues: { ':pk': `USERORGS#${userId}`, ':sk': 'ORGUSER' },
+    }));
+    return (res.Items as OrgUserItem[] | undefined) ?? [];
+  }
+
+  async deleteOrgUser(orgId: string, userId: string): Promise<void> {
+    await this.db.send(new DeleteCommand({
+      TableName: this.table,
+      Key: { pk: `ORGUSER#${orgId}#${userId}`, sk: 'ORGUSER' },
+    }));
+  }
+
+  async putCollection(col: CollectionItem): Promise<void> {
+    await this.db.send(new PutCommand({ TableName: this.table, Item: col }));
+  }
+
+  async getCollection(orgId: string, collectionId: string): Promise<CollectionItem | null> {
+    const res = await this.db.send(new GetCommand({
+      TableName: this.table,
+      Key: { pk: `COLLECTION#${orgId}#${collectionId}`, sk: 'COLLECTION' },
+    }));
+    return (res.Item as CollectionItem | undefined) ?? null;
+  }
+
+  async listCollectionsForOrg(orgId: string): Promise<CollectionItem[]> {
+    const res = await this.db.send(new QueryCommand({
+      TableName: this.table,
+      KeyConditionExpression: 'begins_with(pk, :pk) AND sk = :sk',
+      ExpressionAttributeValues: { ':pk': `COLLECTION#${orgId}#`, ':sk': 'COLLECTION' },
+    }));
+    return (res.Items as CollectionItem[] | undefined) ?? [];
+  }
+
+  // ponytail: accessible collections = filter of per-org list (orgs per user are
+  // few); a USERCOLL GSI becomes worth it when org counts grow.
+  async listCollectionsForUser(userId: string): Promise<CollectionItem[]> {
+    const memberships = await this.listOrganizationsForUser(userId);
+    const out: CollectionItem[] = [];
+    for (const m of memberships) {
+      const cols = await this.listCollectionsForOrg(m.orgId);
+      for (const col of cols) {
+        if (col.users.length === 0 || col.users.some((u) => u.id === userId)) out.push(col);
+      }
+    }
+    return out;
+  }
+
+  async deleteCollection(orgId: string, collectionId: string): Promise<void> {
+    await this.db.send(new DeleteCommand({
+      TableName: this.table,
+      Key: { pk: `COLLECTION#${orgId}#${collectionId}`, sk: 'COLLECTION' },
+    }));
+  }
+
   async listFolders(userId: string): Promise<FolderItem[]> {
     const res = await this.db.send(new QueryCommand({
       TableName: this.table,
@@ -396,6 +639,10 @@ export class MemoryStore implements Store {
   private rates = new Map<string, RateItem>();
   private allCiphers: CipherItem[] = [];
   private allFolders: FolderItem[] = [];
+  private allSends: SendItem[] = [];
+  private allOrgs: OrganizationItem[] = [];
+  private allOrgUsers: OrgUserItem[] = [];
+  private allCollections: CollectionItem[] = [];
 
   async getUserByEmail(email: string): Promise<UserItem | null> {
     return this.usersByEmail.get(email.toLowerCase()) ?? null;
@@ -455,6 +702,8 @@ export class MemoryStore implements Store {
     }
     this.allCiphers = this.allCiphers.filter((c) => !c.pk.startsWith(`CIPHER#${userId}#`));
     this.allFolders = this.allFolders.filter((f) => !f.pk.startsWith(`FOLDER#${userId}#`));
+    this.allSends = this.allSends.filter((s) => !s.pk.startsWith(`SEND#${userId}#`));
+    this.allOrgUsers = this.allOrgUsers.filter((m) => m.userId !== userId);
   }
 
   async putTwoFactorToken(item: TwoFactorItem): Promise<void> {
@@ -524,6 +773,95 @@ export class MemoryStore implements Store {
 
   async deleteFolder(userId: string, folderId: string): Promise<void> {
     this.allFolders = this.allFolders.filter((f) => f.pk !== `FOLDER#${userId}#${folderId}`);
+  }
+
+  async listSends(userId: string): Promise<SendItem[]> {
+    return this.allSends.filter((s) => s.pk.startsWith(`SEND#${userId}#`)).map((s) => ({ ...s }));
+  }
+
+  async putSend(send: SendItem): Promise<void> {
+    this.allSends = this.allSends.filter((s) => s.pk !== send.pk);
+    this.allSends.push({ ...send });
+  }
+
+  async findSendByAccessId(accessId: string): Promise<SendItem | null> {
+    const found = this.allSends.find((s) => s.accessId === accessId);
+    return found ? { ...found } : null;
+  }
+
+  async getSend(userId: string, sendId: string): Promise<SendItem | null> {
+    const found = this.allSends.find((s) => s.pk === `SEND#${userId}#${sendId}`);
+    return found ? { ...found } : null;
+  }
+
+  async deleteSend(userId: string, sendId: string): Promise<void> {
+    this.allSends = this.allSends.filter((s) => s.pk !== `SEND#${userId}#${sendId}`);
+  }
+
+  async putOrganization(org: OrganizationItem): Promise<void> {
+    this.allOrgs = this.allOrgs.filter((o) => o.pk !== org.pk);
+    this.allOrgs.push({ ...org });
+  }
+
+  async getOrganization(orgId: string): Promise<OrganizationItem | null> {
+    const found = this.allOrgs.find((o) => o.pk === `ORG#${orgId}`);
+    return found ? { ...found } : null;
+  }
+
+  async deleteOrganization(orgId: string): Promise<void> {
+    this.allOrgs = this.allOrgs.filter((o) => o.pk !== `ORG#${orgId}`);
+    this.allOrgUsers = this.allOrgUsers.filter((m) => m.pk !== `ORGUSER#${orgId}#`);
+  }
+
+  async putOrgUser(member: OrgUserItem): Promise<void> {
+    this.allOrgUsers = this.allOrgUsers.filter((m) => m.pk !== member.pk);
+    this.allOrgUsers.push({ ...member });
+  }
+
+  async getOrgUser(orgId: string, userId: string): Promise<OrgUserItem | null> {
+    const found = this.allOrgUsers.find((m) => m.pk === `ORGUSER#${orgId}#${userId}`);
+    return found ? { ...found } : null;
+  }
+
+  async listOrgUsers(orgId: string): Promise<OrgUserItem[]> {
+    return this.allOrgUsers.filter((m) => m.pk.startsWith(`ORGUSER#${orgId}#`)).map((m) => ({ ...m }));
+  }
+
+  async listOrganizationsForUser(userId: string): Promise<OrgUserItem[]> {
+    return this.allOrgUsers.filter((m) => m.userId === userId).map((m) => ({ ...m }));
+  }
+
+  async deleteOrgUser(orgId: string, userId: string): Promise<void> {
+    this.allOrgUsers = this.allOrgUsers.filter((m) => m.pk !== `ORGUSER#${orgId}#${userId}`);
+  }
+
+  async putCollection(col: CollectionItem): Promise<void> {
+    this.allCollections = this.allCollections.filter((c) => c.pk !== col.pk);
+    this.allCollections.push({ ...col });
+  }
+
+  async getCollection(orgId: string, collectionId: string): Promise<CollectionItem | null> {
+    const found = this.allCollections.find((c) => c.pk === `COLLECTION#${orgId}#${collectionId}`);
+    return found ? { ...found } : null;
+  }
+
+  async listCollectionsForOrg(orgId: string): Promise<CollectionItem[]> {
+    return this.allCollections.filter((c) => c.pk.startsWith(`COLLECTION#${orgId}#`)).map((c) => ({ ...c }));
+  }
+
+  async listCollectionsForUser(userId: string): Promise<CollectionItem[]> {
+    const memberships = await this.listOrganizationsForUser(userId);
+    const out: CollectionItem[] = [];
+    for (const m of memberships) {
+      for (const col of await this.listCollectionsForOrg(m.orgId)) {
+        if (col.users.length === 0 || col.users.some((u) => u.id === userId)) out.push({ ...col });
+      }
+    }
+    return out;
+  }
+
+  async deleteCollection(orgId: string, collectionId: string): Promise<void> {
+    this.allCollections = this.allCollections.filter((c) => c.pk !== `COLLECTION#${orgId}#${collectionId}`);
   }
 
   async listFolders(userId: string): Promise<FolderItem[]> {

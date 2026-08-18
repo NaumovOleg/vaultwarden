@@ -1,4 +1,5 @@
 import type { SessionItem, Store, UserItem } from './store';
+import type { ObjectStore } from './objects';
 
 export interface Route {
   method: string;
@@ -9,7 +10,9 @@ export interface Route {
 
 export interface RouteContext {
   store: Store;
+  objects: ObjectStore;
   bodyRaw: string;
+  bodyBytes: Buffer;
   bodyForm: URLSearchParams;
   bodyJson: Record<string, any>;
   headers: Record<string, string>;
