@@ -89,6 +89,10 @@ import {
   authenticatorDisable,
   getRecoveryCodes,
   twoFactorDisable,
+  getEmailSetup,
+  sendEmailSetup,
+  sendEmailLogin,
+  emailEnable,
 } from './endpoints/two-factor';
 import { BitwardenError, internalError, notFound, toErrorBody } from './errors';
 import { match, Route, RouteContext } from './router';
@@ -242,6 +246,11 @@ const defaultRoutes: Route[] = [
   { method: 'DELETE', pattern: '/api/two-factor/authenticator', handler: authenticatorDisable, auth: true },
   { method: 'POST', pattern: '/api/two-factor/disable', handler: twoFactorDisable, auth: true },
   { method: 'POST', pattern: '/api/two-factor/get-recover', handler: getRecoveryCodes, auth: true },
+  { method: 'POST', pattern: '/api/two-factor/get-email', handler: getEmailSetup, auth: true },
+  { method: 'POST', pattern: '/api/two-factor/send-email', handler: sendEmailSetup, auth: true },
+  { method: 'POST', pattern: '/api/two-factor/send-email-login', handler: sendEmailLogin },
+  { method: 'POST', pattern: '/api/two-factor/email', handler: emailEnable, auth: true },
+  { method: 'PUT', pattern: '/api/two-factor/email', handler: emailEnable, auth: true },
 ];
 
 function json(statusCode: number, body: string): APIGatewayProxyResult {

@@ -4,7 +4,18 @@ import { createHandler } from '../src/handler';
 import type { Route } from '../src/router';
 import { MemoryStore } from '../src/store';
 import { register, token } from '../src/endpoints/identity';
-import { twoFactorList, getAuthenticator, authenticatorEnable, authenticatorDisable, getRecoveryCodes } from '../src/endpoints/two-factor';
+import {
+  twoFactorList,
+  getAuthenticator,
+  authenticatorEnable,
+  authenticatorDisable,
+  getRecoveryCodes,
+  twoFactorDisable,
+  getEmailSetup,
+  sendEmailSetup,
+  sendEmailLogin,
+  emailEnable,
+} from '../src/endpoints/two-factor';
 
 const routes: Route[] = [
   { method: 'POST', pattern: '/identity/accounts/register', handler: (p, ctx) => register(p, ctx) },
@@ -15,6 +26,12 @@ const routes: Route[] = [
   { method: 'PUT', pattern: '/api/two-factor/authenticator', handler: (p, ctx) => authenticatorEnable(p, ctx), auth: true },
   { method: 'DELETE', pattern: '/api/two-factor/authenticator', handler: (p, ctx) => authenticatorDisable(p, ctx), auth: true },
   { method: 'POST', pattern: '/api/two-factor/get-recover', handler: (p, ctx) => getRecoveryCodes(p, ctx), auth: true },
+  { method: 'POST', pattern: '/api/two-factor/disable', handler: (p, ctx) => twoFactorDisable(p, ctx), auth: true },
+  { method: 'POST', pattern: '/api/two-factor/get-email', handler: (p, ctx) => getEmailSetup(p, ctx), auth: true },
+  { method: 'POST', pattern: '/api/two-factor/send-email', handler: (p, ctx) => sendEmailSetup(p, ctx), auth: true },
+  { method: 'POST', pattern: '/api/two-factor/send-email-login', handler: (p, ctx) => sendEmailLogin(p, ctx) },
+  { method: 'POST', pattern: '/api/two-factor/email', handler: (p, ctx) => emailEnable(p, ctx), auth: true },
+  { method: 'PUT', pattern: '/api/two-factor/email', handler: (p, ctx) => emailEnable(p, ctx), auth: true },
 ];
 
 const PASSWORD = Buffer.from('the-client-side-hash').toString('base64');
@@ -196,5 +213,75 @@ describe('two-factor endpoints + login challenge', () => {
     const plain = await handler(login());
     expect(plain.statusCode).toBe(200);
     expect(JSON.parse(plain.body as string).access_token).toBeDefined();
+  });
+
+  it('email provider: enable via setup code, login challenge lists both providers, code works', async () => {
+    const { store, handler } = makeHandler();
+    await registerUser(handler);
+    const tok = await accessToken(handler);
+
+    const setup = await handler(apiEvent('POST', '/api/two-factor/send-email', { email: 'user@example.com' }, tok));
+    expect(setup.statusCode).toBe(200);
+    const { code, email } = JSON.parse(setup.body as string);
+    expect(code).toMatch(/^\d{6}$/);
+    expect(email).toMatch(/\*\*\*/);
+
+    const bad = await handler(
+      apiEvent('POST', '/api/two-factor/email', { masterPasswordHash: PASSWORD, email: 'user@example.com', token: '000000' }, tok),
+    );
+    expect(bad.statusCode).toBe(400);
+
+    const en = await handler(
+      apiEvent('POST', '/api/two-factor/email', { masterPasswordHash: PASSWORD, email: 'user@example.com', token: code }, tok),
+    );
+    expect(en.statusCode).toBe(200);
+    const user = await store.getUserByEmail('tfa@example.com');
+    expect(user!.email2faEnabled).toBe(true);
+    expect(user!.twoFactorEnabled).toBe(true);
+
+    const challenge = await handler(login());
+    const body = JSON.parse(challenge.body as string);
+    expect(body.TwoFactorProviders).toEqual([1]);
+    expect(body.TwoFactorProviders2['1'].Enabled).toBe(true);
+    expect(body.TwoFactorProviders2['1'].Email).toContain('***');
+
+    const resend = await handler(apiEvent('POST', '/api/two-factor/send-email-login', { email: 'tfa@example.com' }));
+    expect(resend.statusCode).toBe(200);
+    const loginCode = (await store.getEmail2faCode(user!.id))!;
+    expect(loginCode).toMatch(/^\d{6}$/);
+
+    const ok = await handler(
+      login({ twoFactorToken: body.TwoFactorToken, twoFactorProvider: '1', twoFactorCode: loginCode }),
+    );
+    expect(ok.statusCode).toBe(200);
+    expect(JSON.parse(ok.body as string).access_token).toBeDefined();
+  });
+
+  it('multi-provider: TOTP + email both listed, email disable keeps TOTP', async () => {
+    const { store, handler } = makeHandler();
+    await registerUser(handler);
+    const tok = await accessToken(handler);
+
+    const got = await handler(apiEvent('POST', '/api/two-factor/get-authenticator', { masterPasswordHash: PASSWORD }, tok));
+    const key = JSON.parse(got.body as string).key;
+    await handler(apiEvent('POST', '/api/two-factor/authenticator', { masterPasswordHash: PASSWORD, key, token: totpCode(key) }, tok));
+
+    const setup = await handler(apiEvent('POST', '/api/two-factor/send-email', { email: 'user@example.com' }, tok));
+    const code = JSON.parse(setup.body as string).code;
+    await handler(apiEvent('POST', '/api/two-factor/email', { masterPasswordHash: PASSWORD, email: 'user@example.com', token: code }, tok));
+
+    const challenge = await handler(login());
+    const body = JSON.parse(challenge.body as string);
+    expect(body.TwoFactorProviders).toEqual([0, 1]);
+    expect(Object.keys(body.TwoFactorProviders2)).toEqual(['0', '1']);
+
+    const dis = await handler(apiEvent('POST', '/api/two-factor/disable', { masterPasswordHash: PASSWORD, type: 1 }, tok));
+    expect(dis.statusCode).toBe(200);
+    const user = await store.getUserByEmail('tfa@example.com');
+    expect(user!.email2faEnabled).toBe(false);
+    expect(user!.twoFactorEnabled).toBe(true);
+
+    const challenge2 = await handler(login());
+    expect(JSON.parse(challenge2.body as string).TwoFactorProviders).toEqual([0]);
   });
 });

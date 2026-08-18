@@ -147,6 +147,86 @@ export async function twoFactorDisable(params: Record<string, string>, ctx: Rout
   throw new BitwardenError(400, 'Two-step login provider not found.');
 }
 
+const EMAIL_CODE_TTL_SECONDS = 300;
+
+// Mask an address like vaultwarden: first char + *** + @domain.
+function maskEmail(email: string): string {
+  const at = email.lastIndexOf('@');
+  if (at <= 1) return email;
+  return `${email[0]}***${email.slice(at)}`;
+}
+
+function makeEmailCode(): string {
+  return String(Math.floor(100000 + Math.random() * 900000));
+}
+
+// POST /api/two-factor/get-email — setup shape for the web vault row.
+export async function getEmailSetup(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const user = ctx.user!;
+  requirePassword(ctx.bodyJson as Record<string, unknown>, user);
+  return json(200, {
+    enabled: user.email2faEnabled,
+    email: user.email2faEnabled && user.email2faAddress ? user.email2faAddress : '',
+    object: 'twoFactorEmail',
+  });
+}
+
+// POST /api/two-factor/send-email — setup code to the given address; response
+// echoes the masked address (no email transport: code is returned in the body
+// for the CLI/e2e flow and logged; ponytail: swap for SES when shipping).
+export async function sendEmailSetup(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const user = ctx.user!;
+  const body = ctx.bodyJson as Record<string, unknown>;
+  const email = typeof body.email === 'string' ? body.email : '';
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    throw new BitwardenError(400, 'Invalid email.');
+  }
+  const code = makeEmailCode();
+  await ctx.store.putEmail2faCode(user.id, code, Math.floor(Date.now() / 1000) + EMAIL_CODE_TTL_SECONDS);
+  console.log(`[2fa] email code for ${user.id}: ${code}`);
+  return json(200, { email: maskEmail(email), code });
+}
+
+// POST /api/two-factor/send-email-login — login re-send; comes with a
+// twoFactorToken or from a challenged session. Lazy: reuse the same store slot.
+export async function sendEmailLogin(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const body = ctx.bodyJson as Record<string, unknown>;
+  const email = typeof body.email === 'string' ? body.email : '';
+  const user = ctx.user ?? (email ? await ctx.store.getUserByEmail(email.toLowerCase()) : null);
+  if (!user || !user.email2faEnabled) {
+    throw new BitwardenError(404, 'Not found.');
+  }
+  const code = makeEmailCode();
+  await ctx.store.putEmail2faCode(user.id, code, Math.floor(Date.now() / 1000) + EMAIL_CODE_TTL_SECONDS);
+  console.log(`[2fa] email login code for ${user.id}: ${code}`);
+  return json(200, {});
+}
+
+// POST|PUT /api/two-factor/email — enable email 2FA after the setup code.
+export async function emailEnable(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const user = ctx.user!;
+  const body = ctx.bodyJson as Record<string, unknown>;
+  requirePassword(body, user);
+  const email = typeof body.email === 'string' ? body.email : '';
+  const token = typeof body.token === 'string' ? body.token : String(body.token ?? '');
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || !/^\d{6}$/.test(token)) {
+    throw new BitwardenError(400, 'Invalid request.');
+  }
+  const stored = await ctx.store.getEmail2faCode(user.id);
+  if (!stored || stored !== token) {
+    throw new BitwardenError(400, 'Invalid two-factor token.');
+  }
+  await ctx.store.deleteEmail2faCode(user.id);
+  const updated: UserItem = {
+    ...user,
+    email2faEnabled: true,
+    email2faAddress: maskEmail(email),
+    twoFactorEnabled: true,
+  };
+  await ctx.store.putUser(updated);
+  return json(200, {});
+}
+
 // Login-side helpers shared with identity.ts.
 
 // 2FA challenge for /identity/connect/token when a code is required.
