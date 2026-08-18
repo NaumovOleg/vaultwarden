@@ -24,6 +24,7 @@ export interface UserItem {
   privateKey: string | null;
   publicKey: string | null;
   name: string;
+  masterPasswordHint: string | null;
   enabled: boolean;
   premium: boolean;
   twoFactorEnabled: boolean;
@@ -129,6 +130,7 @@ export interface Store {
   getSession(token: string): Promise<SessionItem | null>;
   deleteSession(token: string): Promise<void>;
   deleteSessionsForDevice(userId: string, deviceId: string): Promise<void>;
+  deleteUser(userId: string): Promise<void>;
   putTwoFactorToken(item: TwoFactorItem): Promise<void>;
   getTwoFactorToken(token: string): Promise<TwoFactorItem | null>;
   deleteTwoFactorToken(token: string): Promise<void>;
@@ -240,6 +242,38 @@ export class DynamoStore implements Store {
     // endsession, stamp revocation). Stamp mismatch 401s cover the residual
     // case. Add a SESS-by-device GSI only when ghost-session cleanup shows up
     // as a real problem.
+  }
+
+  async deleteUser(userId: string): Promise<void> {
+    // ponytail: SESS# rows for this user are left to TTL (max 30d) — they are
+    // token-keyed with no GSI; a deleted user's rows 401 on any use anyway.
+    const deleteRows = async (prefix: string, sk: string) => {
+      const res = await this.db.send(new QueryCommand({
+        TableName: this.table,
+        KeyConditionExpression: 'begins_with(pk, :pk) AND sk = :sk',
+        ExpressionAttributeValues: { ':pk': prefix, ':sk': sk },
+      }));
+      const items = (res.Items as { pk: string; sk: string }[] | undefined) ?? [];
+      for (const item of items) {
+        await this.db.send(new DeleteCommand({
+          TableName: this.table,
+          Key: { pk: item.pk, sk: item.sk },
+        }));
+      }
+    };
+    const userRows = await this.db.send(new QueryCommand({
+      TableName: this.table,
+      KeyConditionExpression: 'pk = :pk',
+      ExpressionAttributeValues: { ':pk': `USER#${userId}` },
+    }));
+    for (const item of (userRows.Items as { pk: string; sk: string }[] | undefined) ?? []) {
+      await this.db.send(new DeleteCommand({
+        TableName: this.table,
+        Key: { pk: item.pk, sk: item.sk },
+      }));
+    }
+    await deleteRows(`CIPHER#${userId}#`, 'CIPHER');
+    await deleteRows(`FOLDER#${userId}#`, 'FOLDER');
   }
 
   async putTwoFactorToken(item: TwoFactorItem): Promise<void> {
@@ -408,6 +442,19 @@ export class MemoryStore implements Store {
     for (const [k, s] of this.sessions) {
       if (s.userId === userId && s.deviceId === deviceId) this.sessions.delete(k);
     }
+  }
+
+  async deleteUser(userId: string): Promise<void> {
+    const user = this.users.get(userId);
+    if (user) {
+      this.users.delete(userId);
+      this.usersByEmail.delete(user.email.toLowerCase());
+    }
+    for (const [k, d] of this.devices) {
+      if (d.pk === `USER#${userId}`) this.devices.delete(k);
+    }
+    this.allCiphers = this.allCiphers.filter((c) => !c.pk.startsWith(`CIPHER#${userId}#`));
+    this.allFolders = this.allFolders.filter((f) => !f.pk.startsWith(`FOLDER#${userId}#`));
   }
 
   async putTwoFactorToken(item: TwoFactorItem): Promise<void> {

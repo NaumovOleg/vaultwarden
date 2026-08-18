@@ -55,6 +55,7 @@ async function makeUser(store: MemoryStore, email: string, kdf?: UserItem['kdfTy
     privateKey: null,
     publicKey: null,
     name: email,
+    masterPasswordHint: null,
     enabled: true,
     premium: true,
     twoFactorEnabled: false,

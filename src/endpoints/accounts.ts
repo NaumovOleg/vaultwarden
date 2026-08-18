@@ -1,6 +1,11 @@
 import type { RouteContext } from '../router';
 import type { UserItem } from '../store';
 import { cipherJson } from './ciphers';
+import { folderJson } from './folders';
+import { newUuid, hashPassword } from '../crypto';
+import { verifyClientHash } from '../auth';
+import { BitwardenError } from '../errors';
+import { jsonValue, normalizeKdf } from './identity';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' };
 
@@ -110,16 +115,11 @@ export async function sync(params: Record<string, string>, ctx: RouteContext): P
   const partial = ctx.query['partial'] === 'true';
 
   const folders = await ctx.store.listFolders(user.id);
-  const folderJson = folders.map((f) => ({
-    id: f.id,
-    name: f.name,
-    revisionDate: f.revisionDate,
-    object: 'folder',
-  }));
+  const foldersJson = folders.map(folderJson);
 
   const bundle: Record<string, unknown> = {
     profile: profileJson(user),
-    folders: folderJson,
+    folders: foldersJson,
     object: 'sync',
   };
 
@@ -135,4 +135,126 @@ export async function sync(params: Record<string, string>, ctx: RouteContext): P
     sends: [],
     userDecryption: userDecryptionJson(user),
   });
+}
+
+const JSON_ACCOUNTS_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' };
+
+function jwtJson(statusCode: number, body: unknown) {
+  return { statusCode, headers: JSON_ACCOUNTS_HEADERS, body: JSON.stringify(body) };
+}
+
+function requirePassword(body: Record<string, unknown>, user: UserItem): void {
+  const hash = jsonValue(body, 'masterPasswordHash');
+  if (!verifyClientHash(user, hash)) {
+    throw new BitwardenError(400, 'Invalid password.');
+  }
+}
+
+// POST /api/accounts/password — verify old, store new hash (same salt wrap),
+// akey, hint, kdf, keys; new securityStamp revokes all sessions (matches
+// vaultwarden set_password + reset_security_stamp).
+export async function changePassword(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const user = ctx.user!;
+  const body = ctx.bodyJson as Record<string, unknown>;
+  requirePassword(body, user);
+
+  const newHash = jsonValue(body, 'newMasterPasswordHash');
+  if (typeof newHash !== 'string' || newHash === '') {
+    throw new BitwardenError(400, 'Invalid password.');
+  }
+  const keys = (jsonValue(body, 'keys') ?? {}) as Record<string, unknown>;
+  const kdf = normalizeKdf(jsonValue(body, 'kdf'), {
+    type: user.kdfType,
+    iterations: user.kdfIterations,
+    memory: user.kdfMemory,
+    parallelism: user.kdfParallelism,
+  });
+  const hint = jsonValue(body, 'masterPasswordHint');
+  const updated: UserItem = {
+    ...user,
+    passwordHash: hashPassword(Buffer.from(newHash, 'base64'), Buffer.from(user.salt, 'base64'), 600000).toString(
+      'base64',
+    ),
+    akey: typeof jsonValue(body, 'key') === 'string' ? (jsonValue(body, 'key') as string) : user.akey,
+    masterPasswordHint: typeof hint === 'string' ? hint : null,
+    privateKey: typeof keys.privateKey === 'string' ? keys.privateKey : user.privateKey,
+    publicKey: typeof keys.publicKey === 'string' ? keys.publicKey : user.publicKey,
+    kdfType: kdf.type,
+    kdfIterations: kdf.iterations,
+    kdfMemory: kdf.memory,
+    kdfParallelism: kdf.parallelism,
+    securityStamp: newUuid(),
+    revisionDate: new Date().toISOString(),
+    revisionDateMs: Date.now(),
+  };
+  await ctx.store.putUser(updated);
+  return jwtJson(200, {});
+}
+
+// POST /api/accounts/kdf — verify, store kdf, rotate stamp.
+export async function changeKdf(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const user = ctx.user!;
+  const body = ctx.bodyJson as Record<string, unknown>;
+  requirePassword(body, user);
+  const kdf = normalizeKdf(jsonValue(body, 'kdf'), {
+    type: user.kdfType,
+    iterations: user.kdfIterations,
+    memory: user.kdfMemory,
+    parallelism: user.kdfParallelism,
+  });
+  const updated: UserItem = {
+    ...user,
+    kdfType: kdf.type,
+    kdfIterations: kdf.iterations,
+    kdfMemory: kdf.memory,
+    kdfParallelism: kdf.parallelism,
+    securityStamp: newUuid(),
+    revisionDate: new Date().toISOString(),
+    revisionDateMs: Date.now(),
+  };
+  await ctx.store.putUser(updated);
+  return jwtJson(200, {});
+}
+
+// POST /api/accounts/security-stamp — verify, rotate stamp (force logout).
+export async function rotateSecurityStamp(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const user = ctx.user!;
+  requirePassword(ctx.bodyJson as Record<string, unknown>, user);
+  const updated: UserItem = {
+    ...user,
+    securityStamp: newUuid(),
+    revisionDate: new Date().toISOString(),
+    revisionDateMs: Date.now(),
+  };
+  await ctx.store.putUser(updated);
+  return jwtJson(200, {});
+}
+
+// POST /api/accounts/verify-password — policy shape per research §2.2.
+export async function verifyPassword(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  requirePassword(ctx.bodyJson as Record<string, unknown>, ctx.user!);
+  return jwtJson(200, { MasterPasswordPolicy: { Object: 'masterPasswordPolicy' } });
+}
+
+// POST /api/accounts/delete + DELETE /api/accounts.
+export async function deleteAccount(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const user = ctx.user!;
+  requirePassword(ctx.bodyJson as Record<string, unknown>, user);
+  await ctx.store.deleteUser(user.id);
+  return jwtJson(200, {});
+}
+
+// PUT|POST /api/accounts/profile — {name, avatarColor?}.
+export async function updateProfile(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const user = ctx.user!;
+  const body = ctx.bodyJson as Record<string, unknown>;
+  const updated: UserItem = {
+    ...user,
+    name: typeof body.name === 'string' ? body.name : user.name,
+    avatarColor: typeof body.avatarColor === 'string' ? body.avatarColor : user.avatarColor,
+    revisionDate: new Date().toISOString(),
+    revisionDateMs: Date.now(),
+  };
+  await ctx.store.putUser(updated);
+  return jwtJson(200, profileJson(updated));
 }

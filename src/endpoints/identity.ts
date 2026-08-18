@@ -18,7 +18,7 @@ function json(statusCode: number, body: unknown) {
   return { statusCode, headers: JSON_HEADERS, body: JSON.stringify(body) };
 }
 
-function jsonValue(container: Record<string, unknown>, key: string): unknown {
+export function jsonValue(container: Record<string, unknown>, key: string): unknown {
   const v = container[key];
   if (typeof v === 'string') {
     try {
@@ -44,7 +44,7 @@ const FALLBACK_KDF: KdfConfig = {
   parallelism: DEFAULT_KDF.kdfParallelism,
 };
 
-function normalizeKdf(kdf: unknown, fallback: KdfConfig): KdfConfig {
+export function normalizeKdf(kdf: unknown, fallback: KdfConfig): KdfConfig {
   const k = (kdf ?? {}) as Record<string, unknown>;
   return {
     type: Number(k.kdfType ?? k.type ?? fallback.type),
@@ -99,6 +99,8 @@ export async function register(params: Record<string, string>, ctx: RouteContext
     privateKey: typeof keys.privateKey === 'string' ? keys.privateKey : null,
     publicKey: typeof keys.publicKey === 'string' ? keys.publicKey : null,
     name: String(body.name ?? ''),
+    masterPasswordHint:
+      typeof body.masterPasswordHint === 'string' && body.masterPasswordHint !== '' ? body.masterPasswordHint : null,
     enabled: true,
     premium: true,
     twoFactorEnabled: false,

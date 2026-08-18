@@ -82,6 +82,7 @@ function bareUser(email: string): UserItem {
     privateKey: null,
     publicKey: null,
     name: email,
+    masterPasswordHint: null,
     enabled: true,
     premium: true,
     twoFactorEnabled: false,

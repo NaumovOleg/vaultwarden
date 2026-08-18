@@ -2,10 +2,11 @@ import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 import { createHandler } from '../src/handler';
 import type { Route } from '../src/router';
 import { MemoryStore } from '../src/store';
-import { profile, revisionDate, keys, sync } from '../src/endpoints/accounts';
+import { profile, revisionDate, keys, sync, changePassword, changeKdf, rotateSecurityStamp, verifyPassword, deleteAccount, updateProfile } from '../src/endpoints/accounts';
 import { register, token } from '../src/endpoints/identity';
 
 const PASSWORD = Buffer.from('client-hash').toString('base64');
+const NEW_PASSWORD = Buffer.from('new-client-hash').toString('base64');
 
 const routes: Route[] = [
   { method: 'POST', pattern: '/identity/accounts/register', handler: register },
@@ -14,6 +15,12 @@ const routes: Route[] = [
   { method: 'GET', pattern: '/api/accounts/revision-date', handler: revisionDate, auth: true },
   { method: 'POST', pattern: '/api/accounts/keys', handler: keys, auth: true },
   { method: 'GET', pattern: '/api/sync', handler: sync, auth: true },
+  { method: 'POST', pattern: '/api/accounts/password', handler: changePassword, auth: true },
+  { method: 'POST', pattern: '/api/accounts/kdf', handler: changeKdf, auth: true },
+  { method: 'POST', pattern: '/api/accounts/security-stamp', handler: rotateSecurityStamp, auth: true },
+  { method: 'POST', pattern: '/api/accounts/verify-password', handler: verifyPassword, auth: true },
+  { method: 'POST', pattern: '/api/accounts/delete', handler: deleteAccount, auth: true },
+  { method: 'PUT', pattern: '/api/accounts/profile', handler: updateProfile, auth: true },
 ];
 
 function makeEnv() {
@@ -225,5 +232,169 @@ describe('profile + sync bundle', () => {
     }
     const r = await env.handler(ev('POST', '/api/accounts/keys', '{}'));
     expect(r.statusCode).toBe(401);
+  });
+});
+
+describe('account management', () => {
+  const oldSignups = process.env.SIGNUPS_ALLOWED;
+  beforeAll(() => {
+    process.env.SIGNUPS_ALLOWED = 'true';
+  });
+  afterAll(() => {
+    process.env.SIGNUPS_ALLOWED = oldSignups;
+  });
+
+  it('password change: wrong old hash 400; ok hash rotates stamp + old sessions die', async () => {
+    const env = makeEnv();
+    const at = await registerAndLogin(env, 'pwd@example.com');
+
+    const wrong = await env.handler(
+      ev('POST', '/api/accounts/password', JSON.stringify({ masterPasswordHash: 'AAAAAA==' }), at),
+    );
+    expect(wrong.statusCode).toBe(400);
+    expect(JSON.parse(wrong.body as string).Message).toBe('Invalid password.');
+
+    const ok = await env.handler(
+      ev(
+        'POST',
+        '/api/accounts/password',
+        JSON.stringify({
+          masterPasswordHash: PASSWORD,
+          newMasterPasswordHash: NEW_PASSWORD,
+          key: 'new-akey',
+          masterPasswordHint: 'new hint',
+          kdf: { kdfType: 0, kdfIterations: 600_000 },
+          keys: { publicKey: 'npub', privateKey: 'npriv' },
+        }),
+        at,
+      ),
+    );
+    expect(ok.statusCode).toBe(200);
+
+    expect((await env.handler(ev('GET', '/api/accounts/profile', '', at))).statusCode).toBe(401);
+
+    const user = await env.store.getUserByEmail('pwd@example.com');
+    expect(user!.akey).toBe('new-akey');
+    expect(user!.masterPasswordHint).toBe('new hint');
+    expect(user!.privateKey).toBe('npriv');
+    expect(user!.securityStamp).not.toBe(at);
+
+    const oldLogin = await env.handler(
+      ev(
+        'POST',
+        '/identity/connect/token',
+        new URLSearchParams({
+          grant_type: 'password',
+          username: 'pwd@example.com',
+          password: PASSWORD,
+          scope: 'api offline_access',
+          deviceIdentifier: 'dev-1',
+        }).toString(),
+      ),
+    );
+    expect(oldLogin.statusCode).toBe(400);
+    expect(JSON.parse(oldLogin.body as string).error).toBe('invalid_grant');
+
+    const newLogin = await env.handler(
+      ev(
+        'POST',
+        '/identity/connect/token',
+        new URLSearchParams({
+          grant_type: 'password',
+          username: 'pwd@example.com',
+          password: NEW_PASSWORD,
+          scope: 'api offline_access',
+          deviceIdentifier: 'dev-1',
+        }).toString(),
+      ),
+    );
+    expect(newLogin.statusCode).toBe(200);
+  });
+
+  it('kdf change persists and prelogin/kdf fields update', async () => {
+    const env = makeEnv();
+    const at = await registerAndLogin(env, 'kdf@example.com');
+    const r = await env.handler(
+      ev(
+        'POST',
+        '/api/accounts/kdf',
+        JSON.stringify({ masterPasswordHash: PASSWORD, kdf: { kdfType: 0, kdfIterations: 300_000 } }),
+        at,
+      ),
+    );
+    expect(r.statusCode).toBe(200);
+    const user = await env.store.getUserByEmail('kdf@example.com');
+    expect(user!.kdfIterations).toBe(300_000);
+    expect((await env.handler(ev('GET', '/api/accounts/profile', '', at))).statusCode).toBe(401);
+  });
+
+  it('verify-password: ok → MasterPasswordPolicy envelope; wrong → 400', async () => {
+    const env = makeEnv();
+    const at = await registerAndLogin(env, 'vp@example.com');
+    const ok = await env.handler(
+      ev('POST', '/api/accounts/verify-password', JSON.stringify({ masterPasswordHash: PASSWORD }), at),
+    );
+    expect(ok.statusCode).toBe(200);
+    expect(JSON.parse(ok.body as string)).toEqual({ MasterPasswordPolicy: { Object: 'masterPasswordPolicy' } });
+    const wrong = await env.handler(
+      ev('POST', '/api/accounts/verify-password', JSON.stringify({ masterPasswordHash: 'AAAAAA==' }), at),
+    );
+    expect(wrong.statusCode).toBe(400);
+  });
+
+  it('security-stamp rotates stamp; sessions 401; re-login works', async () => {
+    const env = makeEnv();
+    const at = await registerAndLogin(env, 'stamp@example.com');
+    const r = await env.handler(
+      ev('POST', '/api/accounts/security-stamp', JSON.stringify({ masterPasswordHash: PASSWORD }), at),
+    );
+    expect(r.statusCode).toBe(200);
+    expect((await env.handler(ev('GET', '/api/accounts/profile', '', at))).statusCode).toBe(401);
+    const at2 = await registerAndLogin(env, 'stamp@example.com');
+    expect((await env.handler(ev('GET', '/api/accounts/profile', '', at2))).statusCode).toBe(200);
+  });
+
+  it('profile update: PUT {name, avatarColor} → updated profileJson', async () => {
+    const env = makeEnv();
+    const at = await registerAndLogin(env, 'prof@example.com');
+    const r = await env.handler(
+      ev('PUT', '/api/accounts/profile', JSON.stringify({ name: 'Bob', avatarColor: '#111111' }), at),
+    );
+    expect(r.statusCode).toBe(200);
+    const body = JSON.parse(r.body as string);
+    expect(body.name).toBe('Bob');
+    expect(body.avatarColor).toBe('#111111');
+  });
+
+  it('delete account: data + user rows gone, email reusable, sessions dead', async () => {
+    const env = makeEnv();
+    const at = await registerAndLogin(env, 'gone@example.com');
+    const del = await env.handler(
+      ev('POST', '/api/accounts/delete', JSON.stringify({ masterPasswordHash: PASSWORD }), at),
+    );
+    expect(del.statusCode).toBe(200);
+    expect(await env.store.getUserByEmail('gone@example.com')).toBeNull();
+    expect((await env.handler(ev('GET', '/api/accounts/profile', '', at))).statusCode).toBe(401);
+
+    const relogin = await env.handler(
+      ev(
+        'POST',
+        '/identity/connect/token',
+        new URLSearchParams({
+          grant_type: 'password',
+          username: 'gone@example.com',
+          password: PASSWORD,
+          scope: 'api offline_access',
+          deviceIdentifier: 'dev-1',
+        }).toString(),
+      ),
+    );
+    expect(relogin.statusCode).toBe(400);
+
+    const reg = await env.handler(
+      ev('POST', '/identity/accounts/register', JSON.stringify({ email: 'gone@example.com', masterPasswordAuthentication: { hash: PASSWORD } })),
+    );
+    expect(reg.statusCode).toBe(200);
+    expect((await env.handler(ev('GET', '/api/accounts/profile', '', at))).statusCode).toBe(401);
   });
 });

@@ -2,7 +2,19 @@ import type { APIGatewayProxyEventV2, APIGatewayProxyResult } from 'aws-lambda';
 import { config, alive, now, version } from './endpoints/misc';
 import { register, prelogin, token, endsession } from './endpoints/identity';
 import { deviceList, deviceById, deviceRegisterToken, deviceClearToken } from './endpoints/devices';
-import { profile, revisionDate, keys, sync } from './endpoints/accounts';
+import {
+  profile,
+  revisionDate,
+  keys,
+  sync,
+  changePassword,
+  changeKdf,
+  rotateSecurityStamp,
+  verifyPassword,
+  deleteAccount,
+  updateProfile,
+} from './endpoints/accounts';
+import { folderList, folderGet, folderCreate, folderUpdate, folderDelete } from './endpoints/folders';
 import {
   cipherList,
   cipherGet,
@@ -14,6 +26,7 @@ import {
   cipherMove,
   cipherPurge,
   cipherBulkDelete,
+  cipherImport,
 } from './endpoints/ciphers';
 import { BitwardenError, internalError, notFound, toErrorBody } from './errors';
 import { match, Route, RouteContext } from './router';
@@ -69,8 +82,25 @@ const defaultRoutes: Route[] = [
   { method: 'PUT', pattern: '/api/ciphers/move', handler: cipherMove, auth: true },
   { method: 'POST', pattern: '/api/ciphers/move', handler: cipherMove, auth: true },
   { method: 'POST', pattern: '/api/ciphers/purge', handler: cipherPurge, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/import', handler: cipherImport, auth: true },
   { method: 'POST', pattern: '/api/ciphers/delete', handler: cipherBulkDelete, auth: true },
   { method: 'PUT', pattern: '/api/ciphers/delete', handler: cipherBulkDelete, auth: true },
+  { method: 'GET', pattern: '/api/folders', handler: folderList, auth: true },
+  { method: 'GET', pattern: '/api/folders/:folderId', handler: folderGet, auth: true },
+  { method: 'POST', pattern: '/api/folders', handler: folderCreate, auth: true },
+  { method: 'PUT', pattern: '/api/folders/:folderId', handler: folderUpdate, auth: true },
+  { method: 'POST', pattern: '/api/folders/:folderId', handler: folderUpdate, auth: true },
+  { method: 'DELETE', pattern: '/api/folders/:folderId', handler: folderDelete, auth: true },
+  { method: 'DELETE', pattern: '/api/folders/:folderId/delete', handler: folderDelete, auth: true },
+  { method: 'POST', pattern: '/api/folders/:folderId/delete', handler: folderDelete, auth: true },
+  { method: 'POST', pattern: '/api/accounts/password', handler: changePassword, auth: true },
+  { method: 'POST', pattern: '/api/accounts/kdf', handler: changeKdf, auth: true },
+  { method: 'POST', pattern: '/api/accounts/security-stamp', handler: rotateSecurityStamp, auth: true },
+  { method: 'POST', pattern: '/api/accounts/verify-password', handler: verifyPassword, auth: true },
+  { method: 'POST', pattern: '/api/accounts/delete', handler: deleteAccount, auth: true },
+  { method: 'DELETE', pattern: '/api/accounts', handler: deleteAccount, auth: true },
+  { method: 'PUT', pattern: '/api/accounts/profile', handler: updateProfile, auth: true },
+  { method: 'POST', pattern: '/api/accounts/profile', handler: updateProfile, auth: true },
 ];
 
 function json(statusCode: number, body: string): APIGatewayProxyResult {

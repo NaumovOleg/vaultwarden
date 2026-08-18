@@ -241,4 +241,53 @@ export async function cipherBulkDelete(params: Record<string, string>, ctx: Rout
   return json(200, {});
 }
 
+// POST /api/ciphers/import — {folders: [{name}], ciphers: [cipher objects],
+// folderRelationships: [[folderIdx, cipherIdx]]}. Duplicates allowed (matches
+// vaultwarden). Folder by index; missing index → null folderId.
+export async function cipherImport(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const user = ctx.user!;
+  const body = ctx.bodyJson;
+  const folderIds: string[] = [];
+  const now = new Date().toISOString();
+  if (Array.isArray(body.folders)) {
+    for (const f of body.folders) {
+      if (!f || typeof f !== 'object') {
+        folderIds.push('');
+        continue;
+      }
+      const name = typeof (f as any).name === 'string' ? (f as any).name : '';
+      const id = newUuid();
+      await ctx.store.putFolder({
+        pk: `FOLDER#${user.id}#${id}`,
+        sk: 'FOLDER',
+        id,
+        name,
+        revisionDate: now,
+      });
+      folderIds.push(id);
+    }
+  }
+  if (Array.isArray(body.ciphers)) {
+    body.ciphers.forEach((raw: unknown, idx: number) => {
+      if (!raw || typeof raw !== 'object') return;
+      const content = normalizeCreate(raw as Record<string, any>);
+      const id = newUuid();
+      const rel = Array.isArray(body.folderRelationships) ? body.folderRelationships.find((r: unknown) => Array.isArray(r) && r[1] === idx) : undefined;
+      const folderId = Array.isArray(rel) && typeof rel[0] === 'number' && folderIds[rel[0]] ? folderIds[rel[0]] : null;
+      const item: CipherItem = {
+        ...content,
+        pk: `CIPHER#${user.id}#${id}`,
+        sk: 'CIPHER',
+        id,
+        creationDate: now,
+        revisionDate: now,
+        folderId,
+      };
+      void ctx.store.putCipher(item);
+    });
+  }
+  await Promise.all([]);
+  return json(200, {});
+}
+
 export { cipherJson };

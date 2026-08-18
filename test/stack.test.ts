@@ -3,6 +3,9 @@ import { Match, Template } from 'aws-cdk-lib/assertions';
 import { VaultwardenStack } from '../lib/vaultwarden-stack';
 
 function synth(context: Record<string, unknown> = {}): Template {
+  // Pin the outdir so every run overwrites the same path — CDK's default
+  // random tmp outdir is never cleaned and leaks ~170MB per test run.
+  process.env.CDK_OUTDIR = 'cdk.out-test';
   const app = new cdk.App({ context: { 'vaultwarden:alertEmail': 'test@example.com', ...context } });
   const stack = new VaultwardenStack(app, 'TestStack', {
     env: { account: '111111111111', region: 'eu-west-1' },

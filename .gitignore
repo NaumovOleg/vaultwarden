@@ -11,3 +11,4 @@ static/
 .venv/
 __pycache__/
 .pytest_cache/
+cdk.out-test

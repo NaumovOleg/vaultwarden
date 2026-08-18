@@ -1,9 +1,9 @@
 # STATE.md — Project Memory
 
 ## Current Position
-- **Phase:** 3 (Vault Core) — **plans 01-02 code-complete** (profile/keys/sync + cipher CRUD/trash lifecycle; 89 tests green). Plan 03 = folders CRUD, import, account mgmt (password/kdf/security-stamp/delete), e2e-vault.sh.
-- **Next:** Phase 3 Plan 03; then phase-end owner checkpoint (deploy with signupsAllowed + web-vault login, per standing policy).
-- **Completed:** PROJECT.md, config, research (4 reports), FEATURES.md, REQUIREMENTS.md, ROADMAP.md, phase-1 (3 plans executed), phase-2 plans 01-03 (executed, 72 tests green), phase-3 plans 01-02 (executed, 89 tests green)
+- **Phase:** 3 (Vault Core) — **code-complete** (plans 01-03: profile/keys/sync, cipher CRUD/trash, folders/import/account mgmt; 100 tests green). **Deploy + human web-vault check is OWNER-RUN** — see `.planning/phases/03-vault-core/03-SUMMARY.md` "Deferred / next".
+- **Next:** Owner: `npm run webvault && npx cdk deploy --context vaultwarden:signupsAllowed=true`, `bash scripts/e2e-auth.sh https://vaultwarden.free-bert.online`, `bash scripts/e2e-vault.sh https://vaultwarden.free-bert.online`, redeploy signups=false, human web-vault personal-vault check. Then Phase 4 (attachments).
+- **Completed:** PROJECT.md, config, research (4 reports), FEATURES.md, REQUIREMENTS.md, ROADMAP.md, phase-1 (3 plans executed), phase-2 plans 01-03 (72 tests green), phase-3 plans 01-03 (100 tests green)
 
 ## Project Facts
 - Full custom Bitwarden-compatible server: Node 22 Lambda + DynamoDB + S3, CDK v2 rewrite
@@ -34,5 +34,6 @@
 - Phase 2 plan 03 executed: commit (see log), 72 tests green (8 suites). Bearer middleware (verifyAccessToken + stamp revocation), devices endpoints (list/identifier/token/clear-token), e2e-auth.sh harness. Task 3 (live deploy + web vault login) deferred to owner per standing policy.
 - Phase 3 plan 01 executed: commit (see log), 81 tests green (9 suites). accounts.ts profile/revision-date/keys/sync (+partial), UserItem avatarColor/masterKey*/revisionDate*/revisionDateMs, CipherItem/FolderItem types + list methods, RouteContext.query from rawQueryString.
 - Phase 3 plan 02 executed: commit (see log), 89 tests green (10 suites). ciphers.ts canonical serializer + full CRUD/trash/move/purge/bulk surface (24 routes), sync.ciphers filled, MemoryStore cipher/folder upsert fix, DDB begins_with query fix. Archive skipped (vaultwarden maps archive → soft delete).
+- Phase 3 plan 03 executed: commit (see log), 100 tests green (11 suites). folders.ts CRUD + orphan semantics (pinned vs VW source), POST /api/ciphers/import, account mgmt (password/kdf/security-stamp/verify-password/delete/profile), store.deleteUser, e2e-vault.sh + e2e:vault script. stack.test.ts CDK_OUTDIR pinned (was leaking ~170MB/run → 180GB ENOSPC). Deploy + web-vault check deferred to owner per standing policy.
 - Phase 1 deploy deferred by owner decision ("write the whole project, then I deploy"). Same policy applies to every later phase's deploy task.
 - Phase 2 planned (3 plans); key execution-time verification required: exact `authenticated_response`/`twofactor_auth` field shapes from vaultwarden main `src/api/identity.rs`, and `password_iterations` default from `src/config.rs`.
