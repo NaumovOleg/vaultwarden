@@ -239,6 +239,9 @@ export class VaultwardenStack extends cdk.Stack {
       origin: new origins.HttpOrigin(`${api.apiId}.execute-api.${this.region}.amazonaws.com`),
       viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
       cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+      // Without this, CloudFront allows only GET/HEAD on API paths and kills
+      // every POST/PUT/DELETE with 403 "supports only cachable requests".
+      allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
     };
   }
 }

@@ -125,6 +125,13 @@ describe('VaultwardenStack', () => {
     for (const b of behaviors) {
       expect(b.CachePolicyId).toBe('4135ea2d-6df8-44a3-9df3-4b5a84be39ad');
     }
+    // POST/PUT/DELETE must reach the API — CloudFront kills them with 403
+    // ("supports only cachable requests") unless AllowedMethods includes them.
+    for (const b of behaviors) {
+      expect(b.AllowedMethods.Items).toEqual(
+        expect.arrayContaining(['GET', 'HEAD', 'OPTIONS', 'PUT', 'PATCH', 'POST', 'DELETE']),
+      );
+    }
     const apiOrigin = dist.Properties.DistributionConfig.Origins.find(
       (o: any) => o.CustomOriginConfig !== undefined,
     );

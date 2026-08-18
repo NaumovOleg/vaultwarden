@@ -13,7 +13,9 @@
     "dev": "ts-node --prefer-ts-exts src/dev.ts",
     "webvault": "bash scripts/fetch-webvault.sh",
     "e2e:auth": "bash scripts/e2e-auth.sh",
-    "e2e:vault": "bash scripts/e2e-vault.sh"
+    "e2e:vault": "bash scripts/e2e-vault.sh",
+    "create-bucket": "aws s3 mb s3://vaultwarden-static-602101700579 --region eu-west-1",
+    "static:deploy": "aws s3 sync static s3://vaultwarden-static-602101700579"
   },
   "keywords": [],
   "author": "",
