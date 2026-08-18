@@ -205,13 +205,12 @@ describe('attachments', () => {
     await env.handler(ev('POST', created.url, mp.body, at, mp.contentType));
 
     // trash: object survives, url blanked
-    await env.handler(ev('POST', `/api/ciphers/${cid}/delete`, '', at));
+    await env.handler(ev('POST', `/api/ciphers/${cid}/soft-delete`, '', at));
     expect(env.objects.keys()).toHaveLength(1);
     const listed = await env.store.listCiphers((await env.store.getUserByEmail('purge@example.com'))!.id);
     expect(listed[0].deletedDate).not.toBeNull();
 
     // restore → object still there; serializer re-arms url on read
-    await env.handler(ev('POST', `/api/ciphers/${cid}/delete`, '', at));
     void listed;
 
     // purge → object gone

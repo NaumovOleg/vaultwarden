@@ -221,7 +221,7 @@ describe('cipher CRUD', () => {
     expect(body.name).toBe('renamed');
   });
 
-  it('delete → trash semantics: excluded from list, present in sync with deletedDate; restore brings it back', async () => {
+  it('soft-delete → trash semantics: excluded from list, present in sync with deletedDate; restore brings it back', async () => {
     const env = makeEnv();
     const at = await seed(env, 'trash@example.com');
     const created = JSON.parse(
@@ -229,7 +229,7 @@ describe('cipher CRUD', () => {
     );
     const cid = created.id;
 
-    const del = await env.handler(ev('DELETE', `/api/ciphers/${cid}`, '', at));
+    const del = await env.handler(ev('PUT', `/api/ciphers/${cid}/soft-delete`, '', at));
     expect(del.statusCode).toBe(200);
     expect(JSON.parse(del.body as string)).toEqual({});
 
@@ -245,9 +245,15 @@ describe('cipher CRUD', () => {
     const after = JSON.parse((await env.handler(ev('GET', '/api/ciphers', '', at))).body as string);
     expect(after.data).toHaveLength(1);
     expect(after.data[0].deletedDate).toBeNull();
+
+    // DELETE = permanent (Bitwarden spec), unlike the trashing soft-delete.
+    const hard = await env.handler(ev('DELETE', `/api/ciphers/${cid}`, '', at));
+    expect(hard.statusCode).toBe(200);
+    const uid = (await env.store.getUserByEmail('trash@example.com'))!.id;
+    expect(await env.store.getCipher(uid, cid)).toBeNull();
   });
 
-  it('move sets folderId; bulk delete + purge remove rows permanently', async () => {
+it('move sets folderId; bulk delete removes rows permanently', async () => {
     const env = makeEnv();
     const at = await seed(env, 'lifecycle@example.com');
     const c1 = JSON.parse((await env.handler(ev('POST', '/api/ciphers', JSON.stringify(LOGIN_CIPHER), at))).body as string).id;
@@ -263,9 +269,6 @@ describe('cipher CRUD', () => {
 
     const bulkDel = await env.handler(ev('POST', '/api/ciphers/delete', JSON.stringify({ ids: [c1, c2] }), at));
     expect(bulkDel.statusCode).toBe(200);
-
-    const purge = await env.handler(ev('POST', '/api/ciphers/purge', JSON.stringify({ ids: [c1, c2] }), at));
-    expect(purge.statusCode).toBe(200);
     const uid = (await env.store.getUserByEmail('lifecycle@example.com'))!.id;
     expect(await env.store.getCipher(uid, c1)).toBeNull();
     expect(await env.store.getCipher(uid, c2)).toBeNull();

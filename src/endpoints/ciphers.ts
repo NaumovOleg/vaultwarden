@@ -260,9 +260,9 @@ export async function cipherPartial(params: Record<string, string>, ctx: RouteCo
   return json(200, await cipherJson(updated, 'cipher', ctx.objects));
 }
 
-// DELETE|POST|PUT /api/ciphers/{id} (+ /delete) — soft delete
-async function softDelete(ctx: RouteContext, cipherId: string): Promise<unknown> {
-  const { item, canWrite } = await resolveCipher(ctx, cipherId);
+// PUT /api/ciphers/{id}/soft-delete — trash (restorable)
+export async function cipherSoftDelete(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const { item, canWrite } = await resolveCipher(ctx, params.cipherId);
   if (!canWrite) throw new BitwardenError(403, 'Insufficient permissions to delete this cipher.');
   await ctx.store.putCipher({
     ...item,
@@ -272,8 +272,15 @@ async function softDelete(ctx: RouteContext, cipherId: string): Promise<unknown>
   return json(200, {});
 }
 
+// DELETE|POST /api/ciphers/{id} (/delete) — PERMANENT delete (Bitwarden spec:
+// DELETE = hard; trash lives behind PUT /soft-delete). Attachments purge too.
 export async function cipherDelete(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
-  return softDelete(ctx, params.cipherId);
+  const { orgId, canWrite } = await resolveCipher(ctx, params.cipherId);
+  if (!canWrite) throw new BitwardenError(403, 'Insufficient permissions to delete this cipher.');
+  await ctx.objects.deletePrefix(`attachments/${params.cipherId}/`);
+  if (orgId) await ctx.store.deleteOrgCipher(orgId, params.cipherId);
+  else await ctx.store.deleteCipher(ctx.user!.id, params.cipherId);
+  return json(200, {});
 }
 
 // PUT|POST /api/ciphers/{id}/restore
@@ -318,11 +325,17 @@ export async function cipherPurge(params: Record<string, string>, ctx: RouteCont
   return json(200, {});
 }
 
-// POST|PUT /api/ciphers/delete — bulk soft delete {ids}
+// POST|PUT /api/ciphers/delete — bulk PERMANENT delete {ids}
 export async function cipherBulkDelete(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
   const ids: unknown[] = ctx.bodyJson.ids ?? [];
   for (const id of ids) {
-    if (typeof id === 'string') await softDelete(ctx, id);
+    if (typeof id === 'string') {
+      const { orgId, canWrite } = await resolveCipher(ctx, id);
+      if (!canWrite) continue;
+      await ctx.objects.deletePrefix(`attachments/${id}/`);
+      if (orgId) await ctx.store.deleteOrgCipher(orgId, id);
+      else await ctx.store.deleteCipher(ctx.user!.id, id);
+    }
   }
   return json(200, {});
 }
