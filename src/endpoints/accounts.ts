@@ -205,6 +205,7 @@ export async function changePassword(params: Record<string, string>, ctx: RouteC
     parallelism: user.kdfParallelism,
   });
   const hint = jsonValue(body, 'masterPasswordHint');
+  await ctx.store.clearRememberedDevices(user.id);
   const updated: UserItem = {
     ...user,
     passwordHash: hashPassword(Buffer.from(newHash, 'base64'), Buffer.from(user.salt, 'base64'), 600000).toString(
@@ -237,6 +238,7 @@ export async function changeKdf(params: Record<string, string>, ctx: RouteContex
     memory: user.kdfMemory,
     parallelism: user.kdfParallelism,
   });
+  await ctx.store.clearRememberedDevices(user.id);
   const updated: UserItem = {
     ...user,
     kdfType: kdf.type,
@@ -255,6 +257,7 @@ export async function changeKdf(params: Record<string, string>, ctx: RouteContex
 export async function rotateSecurityStamp(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
   const user = ctx.user!;
   requirePassword(ctx.bodyJson as Record<string, unknown>, user);
+  await ctx.store.clearRememberedDevices(user.id);
   const updated: UserItem = {
     ...user,
     securityStamp: newUuid(),

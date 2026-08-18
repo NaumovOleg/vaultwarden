@@ -228,6 +228,7 @@ export interface Store {
   putUser(user: UserItem): Promise<void>;
   getUserByUserId(userId: string): Promise<UserItem | null>;
   listDevices(userId: string): Promise<DeviceItem[]>;
+  clearRememberedDevices(userId: string): Promise<void>;
   getDevice(userId: string, deviceId: string): Promise<DeviceItem | null>;
   upsertDevice(device: DeviceItem): Promise<void>;
   putSession(session: SessionItem): Promise<void>;
@@ -341,6 +342,14 @@ export class DynamoStore implements Store {
       ExpressionAttributeValues: { ':pk': `USER#${userId}`, ':sk': 'DEV#' },
     }));
     return (res.Items as DeviceItem[] | undefined) ?? [];
+  }
+
+  async clearRememberedDevices(userId: string): Promise<void> {
+    for (const device of await this.listDevices(userId)) {
+      if (device.twoFactorRemembered) {
+        await this.upsertDevice({ ...device, twoFactorRemembered: false });
+      }
+    }
   }
 
   async getDevice(userId: string, deviceId: string): Promise<DeviceItem | null> {
@@ -899,6 +908,14 @@ export class MemoryStore implements Store {
 
   async listDevices(userId: string): Promise<DeviceItem[]> {
     return [...this.devices.values()].filter((d) => d.pk === `USER#${userId}`);
+  }
+
+  async clearRememberedDevices(userId: string): Promise<void> {
+    for (const device of await this.listDevices(userId)) {
+      if (device.twoFactorRemembered) {
+        await this.upsertDevice({ ...device, twoFactorRemembered: false });
+      }
+    }
   }
 
   async getDevice(userId: string, deviceId: string): Promise<DeviceItem | null> {

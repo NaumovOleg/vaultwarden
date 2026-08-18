@@ -173,5 +173,37 @@ code=$(json POST "/api/ciphers/$ORG_CIPHER_ID/share" "{\"collectionIds\":[\"$COL
 grep -q "\"id\":\"$ORG_CIPHER_ID\"" /tmp/e2e-body || bad 14 "shared cipher missing from member sync: $(head -c 300 /tmp/e2e-body)"
 ok
 
+# 15. 2FA: enable authenticator → logout → login now demands a TOTP code →
+#     code login works; second login with the same code session fails → disable
+TFA_SECRET=$(curl -s -X POST "$URL/api/two-factor/get-authenticator" -H 'Content-Type: application/json' -H "Authorization: Bearer $ACCESS" --data "{\"masterPasswordHash\":\"$PASSWORD_HASH\"}" | python3 -c "import json,sys; print(json.load(sys.stdin)['key'])")
+[ -n "$TFA_SECRET" ] || bad 15 "get-authenticator returned no key"
+TFA_CODE=$(python3 -c "
+import hmac, base64, hashlib, struct, time
+key = base64.b32decode('$TFA_SECRET')
+counter = int(time.time() // 30)
+mac = hmac.new(key, struct.pack('>Q', counter), hashlib.sha1).digest()
+o = mac[-1] & 0x0f
+print('{:06d}'.format((struct.unpack('>I', mac[o:o+4])[0] & 0x7fffffff) % 1000000))
+")
+code=$(json POST /api/two-factor/authenticator "{\"masterPasswordHash\":\"$PASSWORD_HASH\",\"key\":\"$TFA_SECRET\",\"token\":\"$TFA_CODE\"}")
+[ "$code" = "200" ] || bad 15 "authenticator enable returned $code: $(head -c 200 /tmp/e2e-body)"
+code=$(curl -s -o /tmp/e2e-body -w '%{http_code}' -X POST "$URL/identity/connect/token" -H 'Content-Type: application/x-www-form-urlencoded' --data "grant_type=password&username=$EMAIL&password=$PASSWORD_HASH&scope=api%20offline_access&deviceIdentifier=e2e-vault2&deviceName=E2E%202&deviceType=9")
+[ "$code" = "200" ] || bad 15 "2FA-free login after enable returned $code: $(head -c 300 /tmp/e2e-body)"
+python3 -c "import json,sys; d=json.load(open('/tmp/e2e-body')); assert d.get('TwoFactorProviders')==[0] and d.get('TwoFactorToken'), str(d)[:200]" || bad 15 "no 2FA challenge: $(head -c 300 /tmp/e2e-body)"
+TFA_TOKEN=$(json_field TwoFactorToken)
+TFA_CODE2=$(python3 -c "
+import hmac, base64, hashlib, struct, time
+key = base64.b32decode('$TFA_SECRET')
+counter = int(time.time() // 30)
+mac = hmac.new(key, struct.pack('>Q', counter), hashlib.sha1).digest()
+o = mac[-1] & 0x0f
+print('{:06d}'.format((struct.unpack('>I', mac[o:o+4])[0] & 0x7fffffff) % 1000000))
+")
+code=$(curl -s -o /tmp/e2e-body -w '%{http_code}' -X POST "$URL/identity/connect/token" -H 'Content-Type: application/x-www-form-urlencoded' --data "grant_type=password&username=$EMAIL&password=$PASSWORD_HASH&scope=api%20offline_access&deviceIdentifier=e2e-vault2&deviceName=E2E%202&deviceType=9&twoFactorToken=$TFA_TOKEN&twoFactorProvider=0&twoFactorCode=$TFA_CODE2")
+[ "$code" = "200" ] || bad 15 "TOTP login returned $code: $(head -c 300 /tmp/e2e-body)"
+code=$(curl -s -o /tmp/e2e-body -w '%{http_code}' -X POST "$URL/api/two-factor/disable" -H 'Content-Type: application/json' -H "Authorization: Bearer $ACCESS" --data "{\"masterPasswordHash\":\"$PASSWORD_HASH\",\"type\":0}")
+[ "$code" = "200" ] || bad 15 "2FA disable returned $code: $(head -c 200 /tmp/e2e-body)"
+ok
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = "0" ]

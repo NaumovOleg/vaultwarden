@@ -4,6 +4,7 @@ import { createHandler } from '../src/handler';
 import type { Route } from '../src/router';
 import { MemoryStore } from '../src/store';
 import { register, token } from '../src/endpoints/identity';
+import { rotateSecurityStamp } from '../src/endpoints/accounts';
 import {
   twoFactorList,
   getAuthenticator,
@@ -32,6 +33,7 @@ const routes: Route[] = [
   { method: 'POST', pattern: '/api/two-factor/send-email-login', handler: (p, ctx) => sendEmailLogin(p, ctx) },
   { method: 'POST', pattern: '/api/two-factor/email', handler: (p, ctx) => emailEnable(p, ctx), auth: true },
   { method: 'PUT', pattern: '/api/two-factor/email', handler: (p, ctx) => emailEnable(p, ctx), auth: true },
+  { method: 'POST', pattern: '/api/accounts/security-stamp', handler: (p, ctx) => rotateSecurityStamp(p, ctx), auth: true },
 ];
 
 const PASSWORD = Buffer.from('the-client-side-hash').toString('base64');
@@ -283,5 +285,37 @@ describe('two-factor endpoints + login challenge', () => {
 
     const challenge2 = await handler(login());
     expect(JSON.parse(challenge2.body as string).TwoFactorProviders).toEqual([0]);
+  });
+
+  it('security-stamp rotation revokes remembered-device bypass', async () => {
+    const { store, handler } = makeHandler();
+    await registerUser(handler);
+    const tok = await accessToken(handler);
+    const got = await handler(apiEvent('POST', '/api/two-factor/get-authenticator', { masterPasswordHash: PASSWORD }, tok));
+    const key = JSON.parse(got.body as string).key;
+    await handler(apiEvent('POST', '/api/two-factor/authenticator', { masterPasswordHash: PASSWORD, key, token: totpCode(key) }, tok));
+
+    const challenge = await handler(login());
+    const tfaToken = JSON.parse(challenge.body as string).TwoFactorToken;
+    await handler(
+      login({
+        twoFactorToken: tfaToken,
+        twoFactorProvider: '0',
+        twoFactorCode: totpCode(key),
+        twoFactorRemember: '1',
+      }),
+    );
+    const user = (await store.getUserByEmail('tfa@example.com'))!;
+    expect((await store.getDevice(user.id, 'dev-1'))!.twoFactorRemembered).toBe(true);
+
+    const rotate = await handler(
+      apiEvent('POST', '/api/accounts/security-stamp', { masterPasswordHash: PASSWORD }, tok),
+    );
+    expect(rotate.statusCode).toBe(200);
+    expect((await store.getDevice(user.id, 'dev-1'))!.twoFactorRemembered).toBe(false);
+
+    const second = await handler(login());
+    expect(second.statusCode).toBe(200);
+    expect(JSON.parse(second.body as string).TwoFactorProviders2).toBeDefined();
   });
 });
