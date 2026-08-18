@@ -244,8 +244,9 @@ export class VaultwardenStack extends cdk.Stack {
       allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
       // Forward viewer headers to the origin: without an origin request policy
       // CloudFront drops Authorization (and Origin for CORS), so every authed
-      // API call 401s through the CDN while direct gateway calls work.
-      originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER,
+      // API call 401s through the CDN while direct gateway calls work. Must
+      // EXCLUDE Host — API Gateway 403s on a foreign Host header.
+      originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
     };
   }
 }

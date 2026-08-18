@@ -134,9 +134,10 @@ describe('VaultwardenStack', () => {
     }
     // Authorization must reach the Lambda — without an origin request policy
     // CloudFront drops it and every authed call 401s through the CDN.
-    // ALL_VIEWER = 216adef6-5c7f-47e4-b989-5492eafa07d3
+    // Must exclude Host: API Gateway 403s on a foreign Host header.
+    // ALL_VIEWER_EXCEPT_HOST_HEADER = b689b0a8-53d0-40ab-baf2-68738e2966ac
     for (const b of behaviors) {
-      expect(b.OriginRequestPolicyId).toBe('216adef6-5c7f-47e4-b989-5492eafa07d3');
+      expect(b.OriginRequestPolicyId).toBe('b689b0a8-53d0-40ab-baf2-68738e2966ac');
     }
     const apiOrigin = dist.Properties.DistributionConfig.Origins.find(
       (o: any) => o.CustomOriginConfig !== undefined,
