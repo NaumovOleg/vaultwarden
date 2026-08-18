@@ -336,7 +336,7 @@ export class DynamoStore implements Store {
       TableName: this.table,
       IndexName: 'GSI1',
       KeyConditionExpression: 'GSI1PK = :pk',
-      ExpressionAttributeValues: { ':pk': `EMAIL#${email.toLowerCase()}` },
+      ExpressionAttributeValues: { ':pk': emailPk(email) },
       Limit: 1,
     }));
     if (!res.Items?.length) return null;
