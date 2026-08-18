@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Join organization</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; background: #111; color: #eee;
+           display: flex; justify-content: center; padding-top: 8vh; margin: 0; }
+    form { width: 320px; display: flex; flex-direction: column; gap: 10px; }
+    input { padding: 10px; border-radius: 4px; border: 1px solid #444; background: #1c1c1c; color: #eee; }
+    button { padding: 10px; border: 0; border-radius: 4px; background: #175ddc; color: #fff; cursor: pointer; }
+    #error { color: #ff7b7b; min-height: 1.2em; }
+  </style>
+</head>
+<body>
+  <form id="accept">
+    <h2>Join organization</h2>
+    <input id="email" type="email" placeholder="Email" required>
+    <input id="name" placeholder="Name (optional)">
+    <input id="password" type="password" placeholder="Master password" required autocomplete="new-password">
+    <button type="submit">Accept invitation</button>
+    <div id="error"></div>
+  </form>
+  <script>
+    const qs = new URLSearchParams(location.search);
+    const token = qs.get('token') ?? '';
+    const orgUserId = qs.get('orgUserId') ?? '';
+
+    function clientHash(pw) {
+      return crypto.subtle.digest('SHA-256', new TextEncoder().encode(pw)).then((buf) => {
+        const bytes = new Uint8Array(buf);
+        let bin = '';
+        for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        return btoa(bin);
+      });
+    }
+
+    document.getElementById('accept').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const error = document.getElementById('error');
+      error.textContent = '';
+      const email = document.getElementById('email').value.trim();
+      const password = document.getElementById('password').value;
+      if (!email || !password) { error.textContent = 'Email and password are required.'; return; }
+      const hash = await clientHash(password);
+      const res = await fetch('/identity/accounts/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email,
+          name: document.getElementById('name').value.trim(),
+          masterPasswordHash: hash,
+          orgInviteToken: token,
+          organizationUserId: orgUserId,
+        }),
+      });
+      if (res.ok) {
+        location.href = '/#/login';
+      } else {
+        const body = await res.json().catch(() => ({}));
+        error.textContent = body.Message ?? `Registration failed (${res.status}).`;
+      }
+    });
+  </script>
+</body>
+</html>

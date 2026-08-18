@@ -115,5 +115,63 @@ code=$(curl -s -o /tmp/e2e-body -w '%{http_code}' -X DELETE "$URL/api/folders/$F
 python3 -c "import json,sys; d=json.load(open('/tmp/e2e-body')); assert all(f['id']!='$FOLDER_ID' for f in d['folders']); c=[x for x in d['ciphers'] if x['name']=='renamed.example.com']; assert len(c)==1 and c[0]['folderId'] is None" || bad 11 "orphan semantics wrong"
 ok
 
+# 12. attachment: v2 create → multipart upload → download via fresh url (byte-identical)
+step 12
+code=$(json POST /api/ciphers/$CIPHER_ID/attachment/v2 '{"key":"ZW5jLWtleQ==","fileName":"e2e.bin","fileSize":12}')
+[ "$code" = "200" ] || bad 12 "attachment v2 returned $code: $(head -c 200 /tmp/e2e-body)"
+ATT_ID=$(json_field attachmentId)
+UPLOAD_URL=$(json_field url)
+[ -n "$ATT_ID" ] && [ -n "$UPLOAD_URL" ] || bad 12 "attachment v2 shape wrong: $(head -c 300 /tmp/e2e-body)"
+printf 'e2e payload!' > /tmp/e2e-payload
+code=$(curl -s -o /tmp/e2e-body -w '%{http_code}' -X POST "$URL${UPLOAD_URL#${URL%/}}" -H "Authorization: Bearer $ACCESS" -F "key=ZW5jLWtleQ==" -F "data=@/tmp/e2e-payload")
+[ "$code" = "200" ] || bad 12 "attachment upload returned $code: $(head -c 200 /tmp/e2e-body)"
+DOWNLOAD_URL=$(python3 -c "import json,sys; d=json.load(open('/tmp/e2e-body')); print(d['attachments'][0]['url'])" )
+[ -n "$DOWNLOAD_URL" ] || bad 12 "missing attachment url"
+[ "$(curl -s -o /tmp/e2e-download -w '%{http_code}' "$DOWNLOAD_URL")" = "200" ] || bad 12 "attachment download failed"
+cmp -s /tmp/e2e-payload /tmp/e2e-download || bad 12 "attachment download not byte-identical"
+ok
+
+# 13. send: text create → anonymous access w/ password → sync shows it → delete cascades
+step 13
+SEND_ID="$(python3 -c "import uuid; print(uuid.uuid4())")"
+code=$(json POST /api/sends "{\"id\":\"$SEND_ID\",\"type\":0,\"name\":\"e2e secret\",\"text\":{\"text\":\"c2VjcmV0\",\"hidden\":true},\"password\":\"c2VuZHB3\",\"maxAccessCount\":3}")
+[ "$code" = "200" ] || bad 13 "send create returned $code: $(head -c 200 /tmp/e2e-body)"
+ACCESS_ID=$(json_field accessId)
+[ -n "$ACCESS_ID" ] || bad 13 "missing accessId"
+code=$(curl -s -o /tmp/e2e-body -w '%{http_code}' -X POST "$URL/api/sends/access/$ACCESS_ID" -H 'Content-Type: application/json' --data '{"password":"c2VuZHB3"}')
+[ "$code" = "200" ] || bad 13 "send access returned $code: $(head -c 200 /tmp/e2e-body)"
+grep -q '"text":"c2VjcmV0"' /tmp/e2e-body || bad 13 "send access payload wrong: $(head -c 300 /tmp/e2e-body)"
+[ "$(get /api/sync)" = "200" ] || bad 13 "sync failed"
+grep -q "\"id\":\"$SEND_ID\"" /tmp/e2e-body || bad 13 "send missing from sync"
+code=$(curl -s -o /tmp/e2e-body -w '%{http_code}' -X DELETE "$URL/api/sends/$SEND_ID" -H "Authorization: Bearer $ACCESS")
+[ "$code" = "200" ] || bad 13 "send delete returned $code"
+ok
+
+# 14. org: create org + collection → invite second account with no-email token →
+#     register second account with token → share cipher → member sync sees it
+step 14
+ORG_ID="$(python3 -c "import uuid; print(uuid.uuid4())")"
+code=$(json POST /api/organizations "{\"id\":\"$ORG_ID\",\"name\":\"E2E Org\",\"billingEmail\":\"org@$EMAIL\",\"key\":\"b3JnLWtleQ==\",\"keys\":{\"publicKey\":\"cHVi\",\"privateKey\":\"cHJpdg==\"},\"collectionName\":\"Team Vault\"}")
+[ "$code" = "200" ] || bad 14 "org create returned $code: $(head -c 200 /tmp/e2e-body)"
+code=$(json POST "/api/organizations/$ORG_ID/users/invite" '{"emails":[{"email":"member@example.com","type":2}]}')
+[ "$code" = "200" ] || bad 14 "invite returned $code: $(head -c 200 /tmp/e2e-body)"
+INVITE_TOKEN=$(python3 -c "import json,sys; print(json.load(open('/tmp/e2e-body'))['invites'][0]['accessToken'])")
+[ -n "$INVITE_TOKEN" ] || bad 14 "invite token missing"
+code=$(curl -s -o /tmp/e2e-body -w '%{http_code}' -X POST "$URL/identity/accounts/register" -H 'Content-Type: application/x-www-form-urlencoded' --data "email=member@example.com&masterPasswordHash=$PASSWORD_HASH&key=YmtleQ==&keys=%7B%22publicKey%22%3A%22cHVi%22%2C%22privateKey%22%3A%22cHJpdg%3D%3D%22%7D&orgInviteToken=$INVITE_TOKEN")
+[ "$code" = "200" ] || bad 14 "member register returned $code: $(head -c 200 /tmp/e2e-body)"
+MEMBER_ACCESS=$(curl -s -X POST "$URL/identity/connect/token" -H 'Content-Type: application/x-www-form-urlencoded' --data "grant_type=password&username=member@example.com&password=$PASSWORD_HASH&scope=api%20offline_access&deviceIdentifier=e2e-member" | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token',''))")
+[ -n "$MEMBER_ACCESS" ] || bad 14 "member login failed"
+[ "$(curl -s -o /tmp/e2e-body -w '%{http_code}' "$URL/api/organizations/$ORG_ID" -H "Authorization: Bearer $MEMBER_ACCESS")" = "200" ] || bad 14 "member cannot see org"
+COLL_ID="$(curl -s "$URL/api/organizations/$ORG_ID/collections" -H "Authorization: Bearer $ACCESS" | python3 -c "import json,sys; print(json.load(sys.stdin)[0]['id'])")"
+[ -n "$COLL_ID" ] || bad 14 "collection id missing"
+code=$(json POST /api/ciphers "{\"type\":1,\"name\":\"org-secret\",\"login\":{\"username\":\"u\",\"password\":\"cA==\"}}")
+[ "$code" = "200" ] || bad 14 "cipher create returned $code"
+ORG_CIPHER_ID=$(json_field id)
+code=$(json POST "/api/ciphers/$ORG_CIPHER_ID/share" "{\"collectionIds\":[\"$COLL_ID\"]}")
+[ "$code" = "200" ] || bad 14 "share returned $code: $(head -c 200 /tmp/e2e-body)"
+[ "$(curl -s -o /tmp/e2e-body -w '%{http_code}' "$URL/api/sync" -H "Authorization: Bearer $MEMBER_ACCESS")" = "200" ] || bad 14 "member sync failed"
+grep -q "\"id\":\"$ORG_CIPHER_ID\"" /tmp/e2e-body || bad 14 "shared cipher missing from member sync: $(head -c 300 /tmp/e2e-body)"
+ok
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = "0" ]

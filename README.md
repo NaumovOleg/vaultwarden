@@ -76,6 +76,23 @@ curl -s -X POST $URL/identity/connect/token               # 404 Bitwarden envelo
 
 Then open `$URL/` in a browser — the Bitwarden Web Vault login page must render.
 
+## Organizations (no-email invites)
+
+Organizations use the no-email invite flow: the invite endpoint returns one
+`accessToken` per invitee instead of sending mail. Surface the accept link
+yourself, e.g. from the admin's member list after `POST
+/api/organizations/{id}/users/invite`:
+
+```
+https://<your-domain>/accept.html?token=<accessToken>&orgUserId=<memberId>
+```
+
+`accept.html` (served from the static bucket) collects email, name and master
+password, hashes the password client-side (SHA-256 → base64) and registers the
+account bound to the invitation. After the first invite, register a regular
+account in the Web Vault — sign-ups must be open at that point
+(`vaultwarden:signupsAllowed: "true"`), then flip the flag back.
+
 ## Architecture in one screen
 
 | Piece | What it is |

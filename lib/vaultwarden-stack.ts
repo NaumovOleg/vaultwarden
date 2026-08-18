@@ -51,10 +51,20 @@ export class VaultwardenStack extends cdk.Stack {
     });
 
     // Regenerable caches, not data — safe to destroy with the stack.
+    const domain = this.node.tryGetContext('vaultwarden:domain') ?? 'https://localhost';
+    const vaultOrigin = new URL(domain).hostname;
     this.attachmentsBucket = new s3.Bucket(this, 'AttachmentsBucket', {
       versioned: true,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
+      cors: [
+        {
+          // Presigned GETs are fetched cross-origin by browser clients (ARCHITECTURE §4.4).
+          allowedOrigins: [vaultOrigin],
+          allowedMethods: [s3.HttpMethods.GET, s3.HttpMethods.HEAD, s3.HttpMethods.PUT],
+          allowedHeaders: ['*'],
+        },
+      ],
     });
     this.staticBucket = new s3.Bucket(this, 'StaticWebvaultBucket', {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
@@ -67,7 +77,6 @@ export class VaultwardenStack extends cdk.Stack {
     });
 
     const version = this.node.tryGetContext('vaultwarden:version') ?? '1.0.0-dev';
-    const domain = this.node.tryGetContext('vaultwarden:domain') ?? 'https://localhost';
     const signupsAllowed = String(
       this.node.tryGetContext('vaultwarden:signupsAllowed') ?? 'false',
     );
@@ -80,11 +89,13 @@ export class VaultwardenStack extends cdk.Stack {
       environment: {
         VERSION: version,
         SIGNUPS_ALLOWED: signupsAllowed,
-        DEFAULT_DOMAIN: new URL(domain).hostname,
+        DEFAULT_DOMAIN: vaultOrigin,
         VAULT_TABLE: this.table.tableName,
+        ATTACHMENTS_BUCKET: this.attachmentsBucket.bucketName,
       },
     });
     this.table.grantReadWriteData(this.handler);
+    this.attachmentsBucket.grantReadWrite(this.handler);
 
     this.api = new cdk.aws_apigatewayv2.HttpApi(this, 'Api', {
       // Catch-all: every request reaches the Lambda, the router decides.
@@ -119,7 +130,10 @@ export class VaultwardenStack extends cdk.Stack {
     });
 
     new cdk.aws_s3_deployment.BucketDeployment(this, 'WebvaultDeployment', {
-      sources: [cdk.aws_s3_deployment.Source.asset('static/webvault')],
+      sources: [
+        cdk.aws_s3_deployment.Source.asset('static/webvault'),
+        cdk.aws_s3_deployment.Source.asset('static', { exclude: ['webvault/**'] }),
+      ],
       destinationBucket: this.staticBucket,
       prune: true,
       distribution: this.distribution,
