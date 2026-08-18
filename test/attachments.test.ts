@@ -12,7 +12,7 @@ import {
   attachmentGet,
   attachmentDeleteHandler,
 } from '../src/endpoints/ciphers';
-import { cipherPurge, cipherDelete } from '../src/endpoints/ciphers';
+import { cipherPurge, cipherDelete, cipherSoftDelete } from '../src/endpoints/ciphers';
 import { deleteAccount } from '../src/endpoints/accounts';
 
 const PASSWORD = Buffer.from('client-hash').toString('base64');
@@ -26,6 +26,7 @@ const routes: Route[] = [
   { method: 'POST', pattern: '/api/ciphers/:cipherId/attachment', handler: attachmentLegacy, auth: true },
   { method: 'GET', pattern: '/api/ciphers/:cipherId/attachment/:attachmentId', handler: attachmentGet, auth: true },
   { method: 'DELETE', pattern: '/api/ciphers/:cipherId/attachment/:attachmentId', handler: attachmentDeleteHandler, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/:cipherId/soft-delete', handler: cipherSoftDelete, auth: true },
   { method: 'POST', pattern: '/api/ciphers/:cipherId/delete', handler: cipherDelete, auth: true },
   { method: 'POST', pattern: '/api/ciphers/purge', handler: cipherPurge, auth: true },
   { method: 'POST', pattern: '/api/accounts/delete', handler: deleteAccount, auth: true },
