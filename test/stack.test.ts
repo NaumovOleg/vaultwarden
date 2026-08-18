@@ -146,4 +146,24 @@ describe('VaultwardenStack', () => {
   it('creates the budget when an alert email is set', () => {
     synth().resourceCountIs('AWS::Budgets::Budget', 1);
   });
+
+  it('creates error alarms + SNS topic when an alert email is set', () => {
+    const t = synth();
+    t.resourceCountIs('AWS::SNS::Topic', 1);
+    t.resourceCountIs('AWS::CloudWatch::Alarm', 2);
+    t.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: '5XXError',
+      Dimensions: Match.arrayWith([Match.objectLike({ Name: 'ApiId' })]),
+      AlarmActions: Match.arrayWith([{ Ref: Match.anyValue() }]),
+    });
+    t.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      MetricName: 'Errors',
+      Dimensions: Match.arrayWith([Match.objectLike({ Name: 'FunctionName' })]),
+    });
+  });
+
+  it('creates no alarms without an alert email', () => {
+    const t = synth({ 'vaultwarden:alertEmail': undefined });
+    t.resourceCountIs('AWS::CloudWatch::Alarm', 0);
+  });
 });

@@ -99,6 +99,10 @@ export class VaultwardenStack extends cdk.Stack {
     this.attachmentsBucket.grantReadWrite(this.handler);
     this.iconsBucket.grantReadWrite(this.handler);
 
+    // Error alarms → SNS → email. Same conditional as the budget: no email
+    // configured means no subscription (a CfnSubscription with an empty
+    // address fails at deploy time).
+
     this.api = new cdk.aws_apigatewayv2.HttpApi(this, 'Api', {
       // Catch-all: every request reaches the Lambda, the router decides.
       defaultIntegration: new cdk.aws_apigatewayv2_integrations.HttpLambdaIntegration(
@@ -106,6 +110,35 @@ export class VaultwardenStack extends cdk.Stack {
         this.handler,
       ),
     });
+
+    if (alertEmail) {
+      const alarmTopic = new cdk.aws_sns.Topic(this, 'AlarmTopic');
+      alarmTopic.addSubscription(new cdk.aws_sns_subscriptions.EmailSubscription(alertEmail));
+
+      new cdk.aws_cloudwatch.Alarm(this, 'LambdaErrorsAlarm', {
+        metric: this.handler.metricErrors(),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cdk.aws_cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        alarmDescription: 'Vaultwarden Lambda threw an unhandled error',
+        treatMissingData: cdk.aws_cloudwatch.TreatMissingData.NOT_BREACHING,
+      }).addAlarmAction(new cdk.aws_cloudwatch_actions.SnsAction(alarmTopic));
+
+      new cdk.aws_cloudwatch.Alarm(this, 'Api5xxAlarm', {
+        metric: new cdk.aws_cloudwatch.Metric({
+          namespace: 'AWS/ApiGateway',
+          metricName: '5XXError',
+          dimensionsMap: { ApiId: this.api.apiId },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cdk.aws_cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        alarmDescription: 'API Gateway returned a 5xx response',
+        treatMissingData: cdk.aws_cloudwatch.TreatMissingData.NOT_BREACHING,
+      }).addAlarmAction(new cdk.aws_cloudwatch_actions.SnsAction(alarmTopic));
+    }
 
     const certificateArn = this.node.tryGetContext('vaultwarden:certificateArn');
     const certificate = certificateArn
