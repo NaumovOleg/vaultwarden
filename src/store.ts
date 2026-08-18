@@ -27,6 +27,11 @@ export interface UserItem {
   enabled: boolean;
   premium: boolean;
   twoFactorEnabled: boolean;
+  avatarColor: string;
+  masterKeyEncryptedUserKey: string | null;
+  masterKeyWrappedUserKey: string | null;
+  revisionDate: string; // ISO
+  revisionDateMs: number; // epoch ms (pitfall 2.2)
   createdAt: string;
 }
 
@@ -68,6 +73,51 @@ export interface RateItem {
   expiresAt: number;
 }
 
+export interface LoginData {
+  uris: { uri: string; match: number | null }[] | null;
+  username: string | null;
+  password: string | null;
+  totp: string | null;
+  passwordRevisionDate: string | null;
+  fido2Credentials: unknown[] | null;
+}
+
+export interface CipherItem {
+  pk: string; // CIPHER#{userId}#{cipherId}
+  sk: string; // CIPHER
+  id: string;
+  type: number;
+  name: string;
+  notes: string | null;
+  favorite: boolean;
+  reprompt: number;
+  folderId: string | null;
+  organizationId: string | null; // orgs = phase 5; null for personal
+  creationDate: string;
+  revisionDate: string;
+  deletedDate: string | null;
+  key: string | null;
+  login: LoginData | null;
+  secureNote: { type: number } | null;
+  card: Record<string, unknown> | null;
+  identity: Record<string, unknown> | null;
+  sshKey: Record<string, unknown> | null;
+  bankAccount: Record<string, unknown> | null;
+  driversLicense: Record<string, unknown> | null;
+  passport: Record<string, unknown> | null;
+  fields: { name: string | null; value: string | null; type: number; linkedId: number | null }[] | null;
+  passwordHistory: unknown[] | null;
+  attachmentCount: number; // 0 (attachments = phase 4)
+}
+
+export interface FolderItem {
+  pk: string; // FOLDER#{userId}#{folderId}
+  sk: string; // FOLDER
+  id: string;
+  name: string;
+  revisionDate: string;
+}
+
 export interface Store {
   getUserByEmail(email: string): Promise<UserItem | null>;
   getUser(userId: string): Promise<UserItem | null>;
@@ -87,6 +137,8 @@ export interface Store {
   putRate(item: RateItem): Promise<void>;
   incrementRate(ip: string, ttlSeconds: number): Promise<void>;
   clearRate(ip: string): Promise<void>;
+  listCiphers(userId: string): Promise<CipherItem[]>;
+  listFolders(userId: string): Promise<FolderItem[]>;
 }
 
 const TABLE = process.env.VAULT_TABLE ?? '';
@@ -236,6 +288,24 @@ export class DynamoStore implements Store {
       Key: { pk: `RATE#${ip}`, sk: 'LOGIN' },
     }));
   }
+
+  async listCiphers(userId: string): Promise<CipherItem[]> {
+    const res = await this.db.send(new QueryCommand({
+      TableName: this.table,
+      KeyConditionExpression: 'pk = :pk AND sk = :sk',
+      ExpressionAttributeValues: { ':pk': `CIPHER#${userId}#`, ':sk': 'CIPHER' },
+    }));
+    return (res.Items as CipherItem[] | undefined) ?? [];
+  }
+
+  async listFolders(userId: string): Promise<FolderItem[]> {
+    const res = await this.db.send(new QueryCommand({
+      TableName: this.table,
+      KeyConditionExpression: 'pk = :pk AND sk = :sk',
+      ExpressionAttributeValues: { ':pk': `FOLDER#${userId}#`, ':sk': 'FOLDER' },
+    }));
+    return (res.Items as FolderItem[] | undefined) ?? [];
+  }
 }
 
 // In-memory store for unit tests. Deleted when a DDB integration test
@@ -247,6 +317,8 @@ export class MemoryStore implements Store {
   private sessions = new Map<string, SessionItem>();
   private twoFactor = new Map<string, TwoFactorItem>();
   private rates = new Map<string, RateItem>();
+  private allCiphers: CipherItem[] = [];
+  private allFolders: FolderItem[] = [];
 
   async getUserByEmail(email: string): Promise<UserItem | null> {
     return this.usersByEmail.get(email.toLowerCase()) ?? null;
@@ -328,5 +400,15 @@ export class MemoryStore implements Store {
 
   async clearRate(ip: string): Promise<void> {
     this.rates.delete(ip);
+  }
+
+  async listCiphers(userId: string): Promise<CipherItem[]> {
+    return this.allCiphers
+      .filter((c) => c.pk === `CIPHER#${userId}#`)
+      .map((c) => ({ ...c }));
+  }
+
+  async listFolders(userId: string): Promise<FolderItem[]> {
+    return this.allFolders.filter((f) => f.pk === `FOLDER#${userId}#`).map((f) => ({ ...f }));
   }
 }

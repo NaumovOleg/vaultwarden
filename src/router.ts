@@ -13,6 +13,7 @@ export interface RouteContext {
   bodyForm: URLSearchParams;
   bodyJson: Record<string, any>;
   headers: Record<string, string>;
+  query: Record<string, string>;
   sourceIp: string;
   user?: UserItem;
   session?: SessionItem;

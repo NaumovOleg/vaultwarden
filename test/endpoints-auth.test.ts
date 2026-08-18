@@ -58,6 +58,11 @@ async function makeUser(store: MemoryStore, email: string, kdf?: UserItem['kdfTy
     enabled: true,
     premium: true,
     twoFactorEnabled: false,
+    avatarColor: '#607D8B',
+    masterKeyEncryptedUserKey: null,
+    masterKeyWrappedUserKey: null,
+    revisionDate: new Date().toISOString(),
+    revisionDateMs: Date.now(),
     createdAt: new Date().toISOString(),
   };
   await store.putUser(user);

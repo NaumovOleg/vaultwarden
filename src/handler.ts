@@ -2,6 +2,7 @@ import type { APIGatewayProxyEventV2, APIGatewayProxyResult } from 'aws-lambda';
 import { config, alive, now, version } from './endpoints/misc';
 import { register, prelogin, token, endsession } from './endpoints/identity';
 import { deviceList, deviceById, deviceRegisterToken, deviceClearToken } from './endpoints/devices';
+import { profile, revisionDate, keys, sync } from './endpoints/accounts';
 import { BitwardenError, internalError, notFound, toErrorBody } from './errors';
 import { match, Route, RouteContext } from './router';
 import { Store, MemoryStore } from './store';
@@ -33,6 +34,10 @@ const defaultRoutes: Route[] = [
   { method: 'POST', pattern: '/api/devices/identifier/:deviceId/token', handler: deviceRegisterToken, auth: true },
   { method: 'PUT', pattern: '/api/devices/identifier/:deviceId/clear-token', handler: deviceClearToken, auth: true },
   { method: 'POST', pattern: '/api/devices/identifier/:deviceId/clear-token', handler: deviceClearToken, auth: true },
+  { method: 'GET', pattern: '/api/accounts/profile', handler: profile, auth: true },
+  { method: 'GET', pattern: '/api/accounts/revision-date', handler: revisionDate, auth: true },
+  { method: 'POST', pattern: '/api/accounts/keys', handler: keys, auth: true },
+  { method: 'GET', pattern: '/api/sync', handler: sync, auth: true },
 ];
 
 function json(statusCode: number, body: string): APIGatewayProxyResult {
@@ -70,6 +75,7 @@ function parseBody(event: APIGatewayProxyEventV2): Omit<RouteContext, 'store'> {
     bodyForm: form,
     bodyJson: jsonBody,
     headers,
+    query: Object.fromEntries(new URLSearchParams(event.rawQueryString ?? '')),
     sourceIp: event.requestContext.http.sourceIp ?? '',
   };
 }

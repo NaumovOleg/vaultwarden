@@ -81,6 +81,7 @@ export async function register(params: Record<string, string>, ctx: RouteContext
   const salt = randomBytes(64);
   const kdf = normalizeKdf(auth.kdf, FALLBACK_KDF);
   const id = newUuid();
+  const now = new Date();
   const user: UserItem = {
     pk: `USER#${id}`,
     sk: 'PROFILE',
@@ -101,7 +102,14 @@ export async function register(params: Record<string, string>, ctx: RouteContext
     enabled: true,
     premium: true,
     twoFactorEnabled: false,
-    createdAt: new Date().toISOString(),
+    avatarColor: '#607D8B',
+    masterKeyEncryptedUserKey:
+      typeof body.masterKeyEncryptedUserKey === 'string' ? body.masterKeyEncryptedUserKey : null,
+    masterKeyWrappedUserKey:
+      typeof body.masterKeyWrappedUserKey === 'string' ? body.masterKeyWrappedUserKey : null,
+    revisionDate: now.toISOString(),
+    revisionDateMs: now.getTime(),
+    createdAt: now.toISOString(),
   };
   await ctx.store.putUser(user);
   return json(200, {});
