@@ -2,10 +2,11 @@ import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 import { createHandler } from '../src/handler';
 import type { Route } from '../src/router';
 import { MemoryStore } from '../src/store';
-import { deviceList, deviceById, deviceRegisterToken, deviceClearToken } from '../src/endpoints/devices';
+import { deviceList, deviceCreate, deviceById, deviceRegisterToken, deviceClearToken } from '../src/endpoints/devices';
 
 const routes: Route[] = [
   { method: 'GET', pattern: '/api/devices', handler: deviceList, auth: true },
+  { method: 'POST', pattern: '/api/devices', handler: deviceCreate, auth: true },
   { method: 'GET', pattern: '/api/devices/identifier/:deviceId', handler: deviceById, auth: true },
   { method: 'PUT', pattern: '/api/devices/identifier/:deviceId/token', handler: deviceRegisterToken, auth: true },
   { method: 'POST', pattern: '/api/devices/identifier/:deviceId/token', handler: deviceRegisterToken, auth: true },
@@ -127,6 +128,23 @@ describe('devices endpoints', () => {
       lastUsedDate: expect.any(String),
       object: 'device',
     });
+  });
+
+  it('creates a device via POST /api/devices (idempotent, trailing slash ok)', async () => {
+    const env = makeEnv();
+    const { accessToken } = await seedUserAndToken(env, 'create@example.com');
+    const body = JSON.stringify({ deviceIdentifier: 'new-dev', name: 'New Dev', deviceType: 9 });
+    const r1 = await env.handler(ev('POST', '/api/devices', body, accessToken));
+    expect(r1.statusCode).toBe(200);
+    expect(JSON.parse(r1.body as string)).toMatchObject({ id: 'new-dev', name: 'New Dev', type: 9, object: 'device' });
+    // idempotent upsert: same id, same row
+    const r2 = await env.handler(ev('POST', '/api/devices/', body, accessToken));
+    expect(r2.statusCode).toBe(200);
+    const listed = await env.handler(ev('GET', '/api/devices', '', accessToken));
+    expect(JSON.parse(listed.body as string).data).toHaveLength(2);
+    // missing identifier → 400
+    const r3 = await env.handler(ev('POST', '/api/devices', '{}', accessToken));
+    expect(r3.statusCode).toBe(400);
   });
 
   it('gets a device by identifier; unknown → 404 envelope', async () => {

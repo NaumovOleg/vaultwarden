@@ -36,13 +36,16 @@ export function match(
   path: string,
   routes: Route[],
 ): Match | null {
-  const exact = routes.find((r) => r.method === method && r.pattern === path);
+  // Clients call /api/sync/ and /api/devices/ — treat trailing slash as
+  // insignificant (root '/' stays as is).
+  const clean = path.length > 1 ? path.replace(/\/+$/, '') : path;
+  const exact = routes.find((r) => r.method === method && r.pattern === clean);
   if (exact) return { handler: exact.handler, params: {}, auth: exact.auth };
 
   for (const route of routes) {
     if (route.method !== method || !route.pattern.includes(':')) continue;
     const patternSegments = route.pattern.split('/');
-    const pathSegments = path.split('/');
+    const pathSegments = clean.split('/');
     if (patternSegments.length !== pathSegments.length) continue;
     const params: Record<string, string> = {};
     let ok = true;

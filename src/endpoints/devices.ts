@@ -1,4 +1,4 @@
-import { notFound } from '../errors';
+import { badRequest, notFound } from '../errors';
 import type { RouteContext } from '../router';
 import type { DeviceItem } from '../store';
 
@@ -28,6 +28,27 @@ export async function deviceList(params: Record<string, string>, ctx: RouteConte
     data: devices.map((d) => deviceJson(d, ctx.user!.id)),
     continuationToken: null,
   });
+}
+
+// POST /api/devices — client-registered device (autofill extension, some
+// mobile flows). Idempotent upsert keyed by deviceIdentifier.
+export async function deviceCreate(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const deviceId = String(ctx.bodyJson.deviceIdentifier ?? ctx.bodyForm.get('deviceIdentifier') ?? '');
+  if (!deviceId) throw badRequest('deviceIdentifier is required.');
+  const now = new Date().toISOString();
+  const existing = await ctx.store.getDevice(ctx.user!.id, deviceId);
+  const device: DeviceItem = {
+    pk: `USER#${ctx.user!.id}`,
+    sk: `DEV#${deviceId}`,
+    name: String(ctx.bodyJson.name ?? ctx.bodyForm.get('name') ?? null),
+    type: Number(ctx.bodyJson.deviceType ?? ctx.bodyForm.get('deviceType') ?? existing?.type ?? 0),
+    pushToken: String(ctx.bodyJson.pushToken ?? ctx.bodyForm.get('pushToken') ?? existing?.pushToken ?? null),
+    creationDate: existing?.creationDate ?? now,
+    lastUsed: now,
+    twoFactorRemembered: existing?.twoFactorRemembered ?? false,
+  };
+  await ctx.store.upsertDevice(device);
+  return json(200, deviceJson(device, ctx.user!.id));
 }
 
 // GET /api/devices/identifier/{deviceId}
