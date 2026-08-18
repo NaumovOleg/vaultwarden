@@ -132,6 +132,12 @@ describe('VaultwardenStack', () => {
         expect.arrayContaining(['GET', 'HEAD', 'OPTIONS', 'PUT', 'PATCH', 'POST', 'DELETE']),
       );
     }
+    // Authorization must reach the Lambda — without an origin request policy
+    // CloudFront drops it and every authed call 401s through the CDN.
+    // ALL_VIEWER = 216adef6-5c7f-47e4-b989-5492eafa07d3
+    for (const b of behaviors) {
+      expect(b.OriginRequestPolicyId).toBe('216adef6-5c7f-47e4-b989-5492eafa07d3');
+    }
     const apiOrigin = dist.Properties.DistributionConfig.Origins.find(
       (o: any) => o.CustomOriginConfig !== undefined,
     );

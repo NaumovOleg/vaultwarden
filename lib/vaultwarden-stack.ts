@@ -242,6 +242,10 @@ export class VaultwardenStack extends cdk.Stack {
       // Without this, CloudFront allows only GET/HEAD on API paths and kills
       // every POST/PUT/DELETE with 403 "supports only cachable requests".
       allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+      // Forward viewer headers to the origin: without an origin request policy
+      // CloudFront drops Authorization (and Origin for CORS), so every authed
+      // API call 401s through the CDN while direct gateway calls work.
+      originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER,
     };
   }
 }
