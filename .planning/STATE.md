@@ -1,8 +1,8 @@
 # STATE.md — Project Memory
 
 ## Current Position
-- **Phase:** 8 (Emergency Access) — plan 01 **code-complete** (149 tests green). **Deploy + human checks OWNER-RUN** — see `.planning/phases/08-emergency-access/01-SUMMARY.md` "Owner handoff".
-- **Next:** final compatibility regression across all 4 clients (ROADMAP: user hands-on once deployed) — OR any remaining owner deploy handoffs for phases 6+7.
+- **Phase:** 8 (Emergency Access) — plan 01 **code-complete** (149 tests green) + requirements reconciliation (ROADMAP/REQUIREMENTS updated). All 8 phases code-complete. **Deploy + human checks OWNER-RUN** — phases 1-8 handoffs + ROADMAP phase 8 "final compat regression on all 4 clients" are the remaining items.
+- **Next:** owner: `npm run webvault && npx cdk deploy` → e2e scripts → web vault hands-on → 4-client compat regression.
 - **Completed:** PROJECT.md, config, research (4 reports), FEATURES.md, REQUIREMENTS.md, ROADMAP.md, phases 1-8 (phase 8: 149 tests green)
 
 ## Project Facts

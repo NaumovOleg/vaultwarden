@@ -38,10 +38,11 @@ Mapped from REQUIREMENTS.md. Each phase ends with a verifiable state; phases are
 - Icons service, domains endpoint, hibp stub, rate-limit tuning, error-format audit against pitfall list, CloudWatch alarms + budget (existing pattern), DynamoDB PITR + restore runbook, E2E test suite (SDK) wired into CI or deploy hook
 - **Success criteria:** full pitfall checklist passes; alarm+backup verified; full SDK E2E suite green from clean account
 
-## Phase 8 — Emergency Access & Extras (MISC-05, v2 leftovers that fit)
-- Emergency access basic flow (trust/accept/request/grant/takeover), avatar stubs, remaining account misc
-- Revisit v2 list; document decisions
-- **Success criteria:** emergency flow works via surfaced tokens; final compat regression run on all 4 clients (user hands-on)
+## Phase 8 — Emergency Access & Extras (MISC-05, v2 leftovers that fit) ✅ code-complete
+- Emergency access basic flow (trust/accept/request/grant/takeover) — shipped plan 08-01: surfaced tokens, static ea-accept.html, e2e step 16
+- Avatar stubs, remaining account misc — documented skips (web vault renders initials, `PUT /api/accounts/avatar` skipped)
+- Revisit v2 list; document decisions — done: REQUIREMENTS.md reconciled (email 2FA shipped w/o transport, EA+domains+hibp moved out of v2, events + enforcement remain v2)
+- **Success criteria:** emergency flow works via surfaced tokens ✅ (curl/e2e); final compat regression on all 4 clients — **OWNER-RUN after deploy**
 
 ## Cross-cutting (every phase)
 - Bitwarden error envelope everywhere; never 404 identity routes (pitfall 1); kdfConfig+legacy duality (pitfall 2); verbatim hash compare (pitfall 5)

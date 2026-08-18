@@ -28,7 +28,7 @@ v1 target = all 4 client types usable: Web Vault OSS, mobile (iOS/Android), desk
 | ACCT-03 | `POST /api/accounts/kdf` — Argon2id/PBKDF2 change with client-provided new masterPasswordHash; rehash stored value | 600k min enforced by client; rehash-on-change mandatory (pitfall 5) |
 | ACCT-04 | `POST /api/accounts/password` — change password + security-stamp cascade; `set-password` (org reset flow) | revoke other sessions |
 | ACCT-05 | `POST /api/accounts/delete` with master-password verification; cascade-delete vault | purge all rows |
-| ACCT-06 | Avatar/name preference endpoints — minimal stub acceptable | |
+| ACCT-06 | Avatar/name preference endpoints — minimal stub acceptable | avatarColor relayed in profile + settable via `PUT/POST /api/accounts/profile` (phase 3); dedicated `PUT /api/accounts/avatar` skipped — web vault renders initials (decision recorded phase 8) |
 | ACCT-07 | `/api/accounts/email` — update email + re-KDF on next login (keep simple: store new email; client re-registers keys) | |
 
 ### VAULT — sync & ciphers (v1: all)
@@ -65,7 +65,7 @@ v1 target = all 4 client types usable: Web Vault OSS, mobile (iOS/Android), desk
 | TFA-01 | TOTP authenticator enable/disable (`/api/two-factor/authenticator`) + disable-2FA key exchange blocks | shared key returned once, relayed |
 | TFA-02 | Recovery codes (generate/list/use) | one-time, rotate |
 | TFA-03 | 2FA login: token error → `TwoFactorProviders`/`TwoFactorProviders2` + 200; completion via `/identity/two-factor`; remember-device token | |
-| TFA-04 | Email 2FA: OUT (no email). Duo/Yubikey/Webauthn: OUT (v2). Clients must degrade gracefully | verify in testing |
+| TFA-04 | Email 2FA: OUT (no email). Duo/Yubikey/Webauthn: OUT (v2). Clients must degrade gracefully | Email 2FA shipped in v1 WITHOUT transport (phase 6): setup/login codes echoed in response + logged; switch to SES only if email ever lands (ponytail). Duo/Yubikey/Webauthn remain OUT (v2). Verify graceful degradation |
 
 ### MISC (v1)
 
@@ -76,7 +76,7 @@ v1 target = all 4 client types usable: Web Vault OSS, mobile (iOS/Android), desk
 | MISC-03 | `/api/domains` equivalent domains (static table from bitwarden `global-domain-whitelist`) | web vault URL detection |
 | MISC-04 | Sends: list/create (text+file), delete | file sends reuse attachment multipart |
 | MISC-05 | Emergency access: trust/accept/access-requests/grant/takeover basic flow | v1 full-ish, no email = token surfacing again |
-| MISC-06 | `/api/hibp` — optional stub | |
+| MISC-06 | `/api/hibp` — optional stub | shipped phase 7: honest 404 (check unavailable), never a false "no breaches" |
 
 ### INFRA (v1)
 
@@ -89,18 +89,22 @@ v1 target = all 4 client types usable: Web Vault OSS, mobile (iOS/Android), desk
 | INFRA-05 | Web Vault OSS static artifact pinned; deploy via BucketDeployment | decision: prebuilt zip vs CI build |
 | INFRA-06 | Logging (request id, auth events), CloudWatch alarms, budget alert (keep existing CostGuard pattern) | |
 | INFRA-07 | Backup/DR: DynamoDB PITR + S3 attachment versioning; restore runbook | replaces nightly SQLite backup |
-| INFRA-08 | Tests: unit (routing, serializers) + @bitwarden/sdk-based E2E script against deployed stage (register→login→sync→cipher CRUD→2FA→org) | SDK scripts are the client-compat proof |
+| INFRA-08 | Tests: unit (routing, serializers) + @bitwarden/sdk-based E2E script against deployed stage (register→login→sync→cipher CRUD→2FA→org) | bash `e2e-auth.sh`+`e2e-vault.sh` are the established integration harness (decision phases 7-8; SDK suite would duplicate them) |
 | INFRA-09 | Local dev: single `dev.ts` http-server wrapping handler; DynamoDB target = real AWS dev table (no emulators) | |
 
-## v2 (deferred — explicit)
+## v2 (deferred — explicit, revisited after phase 8)
 
-- Email 2FA + email verification (blocked by no-email constraint; would need SES later)
+- Email VERIFICATION (blocked by no-email constraint; email-2FA codes already ship without transport — would need SES later)
 - Duo/Yubikey/Webauthn 2FA, passkeys/FIDO2 endpoints (extension uses passkeys increasingly — revisit)
 - SSO (SAML/OIDC relay) — incompatible with no-email/no-idp stance
-- Groups advanced policies, org password policies enforcement
+- Groups advanced policies, org password policies ENFORCEMENT (CRUD ships as stored values; no-ops rejected by design)
 - Billing/premium nags, family plans
 - SignalR push (clients poll — verified acceptable)
 - Edge-handled attachment PUT (6 MB ceiling removal via Lambda@Edge 200→201) — escape hatch documented
+- Org events (`GET /api/organizations/{id}/events`, `/api/collect`) — cheap GET, org Events tab; not built, no client blocker reported
+- Passwordless/passkey endpoint drift, SDK-tier E2E harness (bash e2e scripts are the established harness)
+
+Moved OUT of v2 since requirements were written: email 2FA (shipped v1, no transport), emergency access (shipped v1, phase 8), settings/domains + hibp stub (shipped v1, phase 7).
 
 ## Out of scope (reasoning)
 
