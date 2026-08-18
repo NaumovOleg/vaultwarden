@@ -337,6 +337,11 @@ export class DynamoStore implements Store {
       IndexName: 'GSI1',
       KeyConditionExpression: 'GSI1PK = :pk',
       ExpressionAttributeValues: { ':pk': emailPk(email) },
+      // Newest registration wins: without an explicit order DynamoDB returns
+      // rows in LSM storage order, which flips on compaction — a duplicated
+      // email (test litter, re-registration races) would log into an
+      // arbitrary older account and fail password verification for no reason.
+      ScanIndexForward: false,
       Limit: 1,
     }));
     if (!res.Items?.length) return null;
@@ -356,10 +361,14 @@ export class DynamoStore implements Store {
     return (res.Item as UserItem | undefined) ?? null;
   }
 
+  // Sort key = registration time: with duplicated emails the GSI query must
+  // return the newest account (ScanIndexForward:false), or DynamoDB picks an
+  // arbitrary row in LSM storage order (flips on compaction) and the login
+  // fails password verification against the wrong duplicate.
   async putUser(user: UserItem): Promise<void> {
     await this.db.send(new PutCommand({
       TableName: this.table,
-      Item: { ...user, GSI1PK: emailPk(user.email), GSI1SK: 'PROFILE' },
+      Item: { ...user, GSI1PK: emailPk(user.email), GSI1SK: user.createdAt },
     }));
   }
 

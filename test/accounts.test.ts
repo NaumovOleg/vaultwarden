@@ -86,6 +86,28 @@ describe('profile + sync bundle', () => {
     process.env.SIGNUPS_ALLOWED = oldSignups;
   });
 
+  it('duplicate email resolves to the newest account', async () => {
+    // Stale duplicate rows (test litter, re-registration races) must not win:
+    // DynamoStore orders the GSI by createdAt (ScanIndexForward:false) so the
+    // login hits the freshest account instead of an arbitrary storage row.
+    const env = makeEnv();
+    await env.handler(
+      ev(
+        'POST',
+        '/identity/accounts/register',
+        JSON.stringify({ email: 'dup@example.com', masterPasswordAuthentication: { hash: PASSWORD } }),
+      ),
+    );
+    const first = await env.store.getUserByEmail('dup@example.com');
+    await env.store.putUser({
+      ...first!,
+      id: 'dup2-id',
+      pk: 'USER#dup2-id',
+      createdAt: '2099-01-01T00:00:00.000Z',
+    });
+    expect((await env.store.getUserByEmail('dup@example.com'))!.id).toBe('dup2-id');
+  });
+
   it('profile returns the full shape with explicit accountKeys', async () => {
     const env = makeEnv();
     const at = await registerAndLogin(env, 'profile@example.com');
