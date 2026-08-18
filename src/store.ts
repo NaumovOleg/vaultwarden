@@ -32,6 +32,7 @@ export interface UserItem {
   totpPendingSecret: string | null; // key shown on the setup screen, pre-enable
   email2faEnabled: boolean; // phase 6 plan 02
   email2faAddress: string | null; // masked for display
+  domainsOverride: { equivalentDomains: string[][]; excludedGlobalEquivalentDomains: number[] } | null; // phase 7
   avatarColor: string;
   masterKeyEncryptedUserKey: string | null;
   masterKeyWrappedUserKey: string | null;

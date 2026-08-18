@@ -120,6 +120,7 @@ export async function register(params: Record<string, string>, ctx: RouteContext
     totpPendingSecret: null,
     email2faEnabled: false,
     email2faAddress: null,
+    domainsOverride: null,
     avatarColor: '#607D8B',
     masterKeyEncryptedUserKey:
       typeof body.masterKeyEncryptedUserKey === 'string' ? body.masterKeyEncryptedUserKey : null,

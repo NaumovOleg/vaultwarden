@@ -90,6 +90,7 @@ function bareUser(email: string): UserItem {
     totpPendingSecret: null,
     email2faEnabled: false,
     email2faAddress: null,
+    domainsOverride: null,
     avatarColor: '#607D8B',
     masterKeyEncryptedUserKey: null,
     masterKeyWrappedUserKey: null,

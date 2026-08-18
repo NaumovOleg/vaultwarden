@@ -1,5 +1,5 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResult } from 'aws-lambda';
-import { config, alive, now, version } from './endpoints/misc';
+import { config, alive, now, version, domainsGet, domainsPut, hibpBreach } from './endpoints/misc';
 import { register, prelogin, token, endsession } from './endpoints/identity';
 import { deviceList, deviceById, deviceRegisterToken, deviceClearToken } from './endpoints/devices';
 import {
@@ -121,6 +121,10 @@ const defaultRoutes: Route[] = [
   { method: 'GET', pattern: '/alive', handler: alive },
   { method: 'GET', pattern: '/now', handler: now },
   { method: 'GET', pattern: '/api/version', handler: version },
+  { method: 'GET', pattern: '/api/settings/domains', handler: domainsGet, auth: true },
+  { method: 'PUT', pattern: '/api/settings/domains', handler: domainsPut, auth: true },
+  { method: 'POST', pattern: '/api/settings/domains', handler: domainsPut, auth: true },
+  { method: 'GET', pattern: '/api/hibp/breach', handler: hibpBreach, auth: true },
   { method: 'GET', pattern: '/icons/:host/icon.png', handler: iconHandler },
   { method: 'GET', pattern: '/api/config', handler: config },
   { method: 'POST', pattern: '/identity/accounts/register', handler: register },
