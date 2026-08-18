@@ -49,6 +49,16 @@ export class VaultwardenStack extends cdk.Stack {
       partitionKey: { name: 'GSI1PK', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'GSI1SK', type: dynamodb.AttributeType.STRING },
     });
+    // GSI2: owner → per-user/org listings (ciphers, folders, sends, org
+    // members, collections, policies, emergency access). Rows are keyed
+    // `TYPE#{ownerId}#{itemId}` + a constant sk, so "list by owner" cannot be
+    // a base-table query (partition key only supports equality); the sparse
+    // `owner` attribute routes those lists through this index.
+    this.table.addGlobalSecondaryIndex({
+      indexName: 'GSI2',
+      partitionKey: { name: 'owner', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+    });
 
     // Regenerable caches, not data — safe to destroy with the stack.
     const domain = this.node.tryGetContext('vaultwarden:domain') ?? 'https://localhost';

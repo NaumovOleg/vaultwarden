@@ -382,7 +382,9 @@ export class DynamoStore implements Store {
   }
 
   async putEmergencyAccess(item: EmergencyAccessItem): Promise<void> {
-    await this.db.send(new PutCommand({ TableName: this.table, Item: item }));
+    // owner feeds the GSI2 grantor listing; grantee lookups already go through
+    // GSI1 (EMERGGRANTEE#...), so that side needs no owner.
+    await this.db.send(new PutCommand({ TableName: this.table, Item: { ...item, owner: item.grantorId } }));
   }
 
   async getEmergencyAccess(grantorId: string, itemId: string): Promise<EmergencyAccessItem | null> {
@@ -416,8 +418,9 @@ export class DynamoStore implements Store {
   async listEmergencyAccessForGrantor(grantorId: string): Promise<EmergencyAccessItem[]> {
     const res = await this.db.send(new QueryCommand({
       TableName: this.table,
-      KeyConditionExpression: 'begins_with(pk, :pk)',
-      ExpressionAttributeValues: { ':pk': `EMERG#${grantorId}#` },
+      IndexName: 'GSI2',
+      KeyConditionExpression: 'owner = :owner AND begins_with(sk, :sk)',
+      ExpressionAttributeValues: { ':owner': grantorId, ':sk': 'EMERG' },
     }));
     return (res.Items as EmergencyAccessItem[] | undefined) ?? [];
   }
@@ -482,11 +485,12 @@ export class DynamoStore implements Store {
   async deleteUser(userId: string): Promise<void> {
     // ponytail: SESS# rows for this user are left to TTL (max 30d) — they are
     // token-keyed with no GSI; a deleted user's rows 401 on any use anyway.
-    const deleteRows = async (prefix: string, sk: string) => {
+    const deleteRows = async (userId: string, sk: string) => {
       const res = await this.db.send(new QueryCommand({
         TableName: this.table,
-        KeyConditionExpression: 'begins_with(pk, :pk) AND sk = :sk',
-        ExpressionAttributeValues: { ':pk': prefix, ':sk': sk },
+        IndexName: 'GSI2',
+        KeyConditionExpression: 'owner = :owner AND begins_with(sk, :sk)',
+        ExpressionAttributeValues: { ':owner': userId, ':sk': sk },
       }));
       const items = (res.Items as { pk: string; sk: string }[] | undefined) ?? [];
       for (const item of items) {
@@ -507,14 +511,14 @@ export class DynamoStore implements Store {
         Key: { pk: item.pk, sk: item.sk },
       }));
     }
-    await deleteRows(`CIPHER#${userId}#`, 'CIPHER');
-    await deleteRows(`FOLDER#${userId}#`, 'FOLDER');
-    await deleteRows(`SEND#${userId}#`, 'SEND');
+    await deleteRows(userId, 'CIPHER');
+    await deleteRows(userId, 'FOLDER');
+    await deleteRows(userId, 'SEND');
     // Trust relations die with either side (mirrors the emergency_access FK cascade).
     for (const item of await this.listEmergencyAccessForGrantee(userId)) {
       await this.deleteEmergencyAccess(item.grantorId, item.itemId);
     }
-    await deleteRows(`EMERG#${userId}#`, 'EMERG');
+    await deleteRows(userId, 'EMERG');
     const memberships = await this.listOrganizationsForUser(userId);
     for (const m of memberships) await this.deleteOrgUser(m.orgId, userId);
   }
@@ -621,14 +625,18 @@ export class DynamoStore implements Store {
   async listCiphers(userId: string): Promise<CipherItem[]> {
     const res = await this.db.send(new QueryCommand({
       TableName: this.table,
-      KeyConditionExpression: 'begins_with(pk, :pk) AND sk = :sk',
-      ExpressionAttributeValues: { ':pk': `CIPHER#${userId}#`, ':sk': 'CIPHER' },
+      IndexName: 'GSI2',
+      KeyConditionExpression: 'owner = :owner AND begins_with(sk, :sk)',
+      ExpressionAttributeValues: { ':owner': userId, ':sk': 'CIPHER' },
     }));
     return (res.Items as CipherItem[] | undefined) ?? [];
   }
 
   async putCipher(cipher: CipherItem): Promise<void> {
-    await this.db.send(new PutCommand({ TableName: this.table, Item: cipher }));
+    // personal rows: owner=userId (listed via GSI2); org rows are reached
+    // through ORGCOLL links, so they carry no owner and stay out of the index.
+    const owner = cipher.organizationId ? undefined : cipher.pk.split('#')[1];
+    await this.db.send(new PutCommand({ TableName: this.table, Item: { ...cipher, owner } }));
   }
 
   async getCipher(userId: string, cipherId: string): Promise<CipherItem | null> {
@@ -715,7 +723,14 @@ export class DynamoStore implements Store {
       if (!oldIds.includes(colId)) {
         await this.db.send(new PutCommand({
           TableName: this.table,
-          Item: { pk: `ORGCOLL#${orgId}#${colId}`, sk: `CIPHER#${cipherId}`, orgId, collectionId: colId, cipherId },
+          Item: {
+            pk: `ORGCOLL#${orgId}#${colId}`,
+            sk: `CIPHER#${cipherId}`,
+            owner: orgId, // listOrgCiphers lists links by owner via GSI2
+            orgId,
+            collectionId: colId,
+            cipherId,
+          },
         }));
       }
     }
@@ -749,7 +764,10 @@ export class DynamoStore implements Store {
   }
 
   async putFolder(folder: FolderItem): Promise<void> {
-    await this.db.send(new PutCommand({ TableName: this.table, Item: folder }));
+    await this.db.send(new PutCommand({
+      TableName: this.table,
+      Item: { ...folder, owner: folder.pk.split('#')[1] },
+    }));
   }
 
   async getFolder(userId: string, folderId: string): Promise<FolderItem | null> {
@@ -770,8 +788,9 @@ export class DynamoStore implements Store {
   async listSends(userId: string): Promise<SendItem[]> {
     const res = await this.db.send(new QueryCommand({
       TableName: this.table,
-      KeyConditionExpression: 'begins_with(pk, :pk) AND sk = :sk',
-      ExpressionAttributeValues: { ':pk': `SEND#${userId}#`, ':sk': 'SEND' },
+      IndexName: 'GSI2',
+      KeyConditionExpression: 'owner = :owner AND begins_with(sk, :sk)',
+      ExpressionAttributeValues: { ':owner': userId, ':sk': 'SEND' },
     }));
     return (res.Items as SendItem[] | undefined) ?? [];
   }
@@ -779,7 +798,12 @@ export class DynamoStore implements Store {
   async putSend(send: SendItem): Promise<void> {
     await this.db.send(new PutCommand({
       TableName: this.table,
-      Item: { ...send, GSI1PK: `SENDACCESS#${send.accessId}`, GSI1SK: 'SEND' },
+      Item: {
+        ...send,
+        owner: send.pk.split('#')[1],
+        GSI1PK: `SENDACCESS#${send.accessId}`,
+        GSI1SK: 'SEND',
+      },
     }));
   }
 
@@ -835,6 +859,7 @@ export class DynamoStore implements Store {
       TableName: this.table,
       Item: {
         ...member,
+        owner: member.orgId,
         // bound → user's org list; invited (no account yet) → invite token lookup
         GSI1PK: member.userId ? `USERORGS#${member.userId}` : `INVITE#${member.accessToken}`,
         GSI1SK: 'ORGUSER',
@@ -864,8 +889,9 @@ export class DynamoStore implements Store {
   async listOrgUsers(orgId: string): Promise<OrgUserItem[]> {
     const res = await this.db.send(new QueryCommand({
       TableName: this.table,
-      KeyConditionExpression: 'begins_with(pk, :pk) AND sk = :sk',
-      ExpressionAttributeValues: { ':pk': `ORGUSER#${orgId}#`, ':sk': 'ORGUSER' },
+      IndexName: 'GSI2',
+      KeyConditionExpression: 'owner = :owner AND begins_with(sk, :sk)',
+      ExpressionAttributeValues: { ':owner': orgId, ':sk': 'ORGUSER' },
     }));
     return (res.Items as OrgUserItem[] | undefined) ?? [];
   }
@@ -890,7 +916,7 @@ export class DynamoStore implements Store {
   async putPolicy(policy: PolicyItem): Promise<void> {
     await this.db.send(new PutCommand({
       TableName: this.table,
-      Item: { ...policy },
+      Item: { ...policy, owner: policy.organizationId },
     }));
   }
 
@@ -905,14 +931,18 @@ export class DynamoStore implements Store {
   async listPolicies(orgId: string): Promise<PolicyItem[]> {
     const res = await this.db.send(new QueryCommand({
       TableName: this.table,
-      KeyConditionExpression: 'begins_with(pk, :pk) AND sk = :sk',
-      ExpressionAttributeValues: { ':pk': `ORG#${orgId}#POLICY#`, ':sk': 'POLICY' },
+      IndexName: 'GSI2',
+      KeyConditionExpression: 'owner = :owner AND begins_with(sk, :sk)',
+      ExpressionAttributeValues: { ':owner': orgId, ':sk': 'POLICY' },
     }));
     return (res.Items as PolicyItem[] | undefined) ?? [];
   }
 
   async putCollection(col: CollectionItem): Promise<void> {
-    await this.db.send(new PutCommand({ TableName: this.table, Item: col }));
+    await this.db.send(new PutCommand({
+      TableName: this.table,
+      Item: { ...col, owner: col.organizationId },
+    }));
   }
 
   async getCollection(orgId: string, collectionId: string): Promise<CollectionItem | null> {
@@ -926,8 +956,9 @@ export class DynamoStore implements Store {
   async listCollectionsForOrg(orgId: string): Promise<CollectionItem[]> {
     const res = await this.db.send(new QueryCommand({
       TableName: this.table,
-      KeyConditionExpression: 'begins_with(pk, :pk) AND sk = :sk',
-      ExpressionAttributeValues: { ':pk': `COLLECTION#${orgId}#`, ':sk': 'COLLECTION' },
+      IndexName: 'GSI2',
+      KeyConditionExpression: 'owner = :owner AND begins_with(sk, :sk)',
+      ExpressionAttributeValues: { ':owner': orgId, ':sk': 'COLLECTION' },
     }));
     return (res.Items as CollectionItem[] | undefined) ?? [];
   }
@@ -957,8 +988,9 @@ export class DynamoStore implements Store {
   async listFolders(userId: string): Promise<FolderItem[]> {
     const res = await this.db.send(new QueryCommand({
       TableName: this.table,
-      KeyConditionExpression: 'begins_with(pk, :pk) AND sk = :sk',
-      ExpressionAttributeValues: { ':pk': `FOLDER#${userId}#`, ':sk': 'FOLDER' },
+      IndexName: 'GSI2',
+      KeyConditionExpression: 'owner = :owner AND begins_with(sk, :sk)',
+      ExpressionAttributeValues: { ':owner': userId, ':sk': 'FOLDER' },
     }));
     return (res.Items as FolderItem[] | undefined) ?? [];
   }
