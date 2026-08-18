@@ -110,6 +110,14 @@ export class VaultwardenStack extends cdk.Stack {
       },
     });
 
+    new cdk.aws_s3_deployment.BucketDeployment(this, 'WebvaultDeployment', {
+      sources: [cdk.aws_s3_deployment.Source.asset('static/webvault')],
+      destinationBucket: this.staticBucket,
+      prune: true,
+      distribution: this.distribution,
+      distributionPaths: ['/*'],
+    });
+
     new cdk.CfnOutput(this, 'CdnDomainName', {
       value: `https://${this.distribution.distributionDomainName}`,
       description: 'Public URL. Put this in cdk.json as vaultwarden:domain, then redeploy.',
