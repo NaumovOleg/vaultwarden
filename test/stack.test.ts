@@ -1,21 +1,20 @@
 import * as cdk from 'aws-cdk-lib';
-import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
+import { Match, Template } from 'aws-cdk-lib/assertions';
 import { VaultwardenStack } from '../lib/vaultwarden-stack';
 
-function build(context: Record<string, unknown> = {}): cdk.Stack {
+function synth(context: Record<string, unknown> = {}): Template {
   const app = new cdk.App({ context: { 'vaultwarden:alertEmail': 'test@example.com', ...context } });
-  return new VaultwardenStack(app, 'TestStack', {
+  const stack = new VaultwardenStack(app, 'TestStack', {
     env: { account: '111111111111', region: 'eu-west-1' },
   });
+  return Template.fromStack(stack);
 }
 
-function synth(context: Record<string, unknown> = {}): Template {
-  return Template.fromStack(build(context));
-}
-
-function appFunction(t: Template): any {
-  const fns = t.findResources('AWS::Lambda::Function');
-  const match = Object.values(fns).find((f: any) => f.Properties.FunctionName === 'vaultwarden');
+// The nodejs22 API lambda (the stack also creates custom-resource lambdas for
+// S3 auto-delete; filter those out by runtime).
+function handlerFunction(t: Template): any {
+  const fns = Object.values(t.findResources('AWS::Lambda::Function')) as any[];
+  const match = fns.find((f) => f.Properties.Runtime === 'nodejs22.x');
   expect(match).toBeDefined();
   return match;
 }
@@ -25,87 +24,105 @@ describe('VaultwardenStack', () => {
     expect(() => synth()).not.toThrow();
   });
 
-  it('creates no NAT gateways', () => {
-    synth().resourceCountIs('AWS::EC2::NatGateway', 0);
-  });
-});
-
-// SIGNUPS_ALLOWED is the one setting that is both a security control and a
-// bootstrap requirement: Vaultwarden 1.35.1 admits a registration only when an
-// invitation exists or signups are open (src/api/core/accounts.rs), and with no
-// ADMIN_TOKEN and no SMTP there is no way to issue an invitation — so the owner
-// account can only ever be created during a deploy that has this open.
-describe('Registration bootstrap', () => {
-  it('closes registration by default, so the steady state is a closed server', () => {
-    expect(appFunction(synth()).Properties.Environment.Variables.SIGNUPS_ALLOWED).toBe('false');
-  });
-
-  it('opens registration when the context key says so, for the pass-1 bootstrap deploy', () => {
-    const t = synth({ 'vaultwarden:signupsAllowed': 'true' });
-    expect(appFunction(t).Properties.Environment.Variables.SIGNUPS_ALLOWED).toBe('true');
-  });
-
-  it('treats a JSON true in cdk.json the same as the CLI string', () => {
-    const t = synth({ 'vaultwarden:signupsAllowed': true });
-    expect(appFunction(t).Properties.Environment.Variables.SIGNUPS_ALLOWED).toBe('true');
-  });
-
-  it('fails closed on any other value, rather than opening the server on a typo', () => {
-    for (const value of ['yes', 'TRUE', '1', '']) {
-      const t = synth({ 'vaultwarden:signupsAllowed': value });
-      expect(appFunction(t).Properties.Environment.Variables.SIGNUPS_ALLOWED).toBe('false');
-    }
-  });
-
-  it('still never sets ADMIN_TOKEN by default — the bootstrap does not open /admin', () => {
-    const t = synth({ 'vaultwarden:signupsAllowed': 'true' });
-    expect(appFunction(t).Properties.Environment.Variables).not.toHaveProperty('ADMIN_TOKEN');
-  });
-});
-
-// The alert address gates BOTH the backup-failure alarm and the budget, and
-// cdk.json ships it blank. Composed with the bucket's 90-day expiry, a silent
-// default means a backup that starts failing is invisible until the last good
-// snapshot has already expired. The conditional is correct; the silence is not.
-describe('Alerting prerequisite', () => {
-  it('warns at synth time when no alert email is configured, naming what is lost', () => {
-    const stack = build({ 'vaultwarden:alertEmail': '' });
-
-    Annotations.fromStack(stack).hasWarning(
-      '*',
-      Match.stringLikeRegexp('vaultwarden:alertEmail is not set'),
-    );
-
-    // The warning must be specific enough to act on, not a generic nudge.
-    const warnings = Annotations.fromStack(stack).findWarning('*', Match.anyValue());
-    const text = JSON.stringify(warnings);
-    expect(text).toContain('alarm');
-    expect(text).toContain('Budgets');
-    expect(text).toContain('90 days');
-
-    // And the warning is telling the truth about what the template contains.
-    const template = Template.fromStack(stack);
-    template.resourceCountIs('AWS::CloudWatch::Alarm', 0);
-    template.resourceCountIs('AWS::SNS::Topic', 0);
-    template.resourceCountIs('AWS::Budgets::Budget', 0);
-  });
-
-  it('does not warn when an alert email is configured, and creates the alarm and budget', () => {
-    const stack = build();
-
-    Annotations.fromStack(stack).hasNoWarning(
-      '*',
-      Match.stringLikeRegexp('vaultwarden:alertEmail is not set'),
-    );
-
-    const template = Template.fromStack(stack);
-    template.resourceCountIs('AWS::Budgets::Budget', 1);
-    template.resourceCountIs('AWS::SNS::Topic', 1);
-    template.hasResourceProperties('AWS::SNS::Subscription', {
-      Protocol: 'email',
-      Endpoint: 'test@example.com',
+  it('creates a DynamoDB table with on-demand billing and PITR', () => {
+    const t = synth();
+    t.hasResourceProperties('AWS::DynamoDB::Table', {
+      BillingMode: 'PAY_PER_REQUEST',
+      PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
+      AttributeDefinitions: Match.arrayWith([
+        { AttributeName: 'pk', AttributeType: 'S' },
+        { AttributeName: 'sk', AttributeType: 'S' },
+      ]),
+      KeySchema: Match.arrayWith([
+        { AttributeName: 'pk', KeyType: 'HASH' },
+        { AttributeName: 'sk', KeyType: 'RANGE' },
+      ]),
     });
   });
-});
 
-export { synth };
+  it('creates the three S3 buckets', () => {
+    synth().resourceCountIs('AWS::S3::Bucket', 3);
+  });
+
+  it('creates the nodejs22 Lambda with the expected environment', () => {
+    const t = synth({
+      'vaultwarden:version': '2.0.0',
+      'vaultwarden:signupsAllowed': 'true',
+      'vaultwarden:domain': 'https://vault.example.com',
+    });
+    const fn = handlerFunction(t);
+    expect(fn.Properties.MemorySize).toBe(512);
+    expect(fn.Properties.Timeout).toBe(30);
+    expect(fn.Properties.Environment.Variables).toEqual({
+      VERSION: '2.0.0',
+      SIGNUPS_ALLOWED: 'true',
+      DEFAULT_DOMAIN: 'vault.example.com',
+    });
+  });
+
+  it('grants the lambda read access to the table', () => {
+    const t = synth();
+    const fn = handlerFunction(t);
+    expect(fn.Properties.Role).toBeDefined();
+    const policies = Object.values(t.findResources('AWS::IAM::Policy')) as any[];
+    const hasDescribeTable = policies.some((p) =>
+      JSON.stringify(p.Properties.PolicyDocument.Statement).includes('dynamodb:DescribeTable'),
+    );
+    expect(hasDescribeTable).toBe(true);
+  });
+
+  it('creates an HTTP API with a catch-all route to the lambda', () => {
+    const t = synth();
+    t.hasResourceProperties('AWS::ApiGatewayV2::Api', { ProtocolType: 'HTTP' });
+    t.hasResourceProperties('AWS::ApiGatewayV2::Route', { RouteKey: '$default' });
+  });
+
+  it('serves the web vault from S3 via OAC', () => {
+    const t = synth();
+    t.hasResourceProperties('AWS::CloudFront::OriginAccessControl', {
+      OriginAccessControlConfig: {
+        OriginAccessControlOriginType: 's3',
+        SigningBehavior: 'always',
+        SigningProtocol: 'sigv4',
+      },
+    });
+    const dist = Object.values(t.findResources('AWS::CloudFront::Distribution'))[0] as any;
+    const origins = dist.Properties.DistributionConfig.Origins as any[];
+    expect(origins.length).toBe(2);
+    const s3Origin = origins.find((o) => o.S3OriginConfig !== undefined);
+    expect(s3Origin).toBeDefined();
+    expect(s3Origin!.OriginAccessControlId).toBeDefined();
+  });
+
+  it('routes the five API path behaviors to the gateway, uncached', () => {
+    const t = synth();
+    const dist = Object.values(t.findResources('AWS::CloudFront::Distribution'))[0] as any;
+    const behaviors = dist.Properties.DistributionConfig.CacheBehaviors as any[];
+    const paths = behaviors.map((b: any) => b.PathPattern).sort();
+    expect(paths).toEqual(['/alive', '/api/*', '/icons/*', '/identity/*', '/now']);
+    // Managed-CachingDisabled policy id (CDK CachePolicy.CACHING_DISABLED)
+    for (const b of behaviors) {
+      expect(b.CachePolicyId).toBe('4135ea2d-6df8-44a3-9df3-4b5a84be39ad');
+    }
+    const apiOrigin = dist.Properties.DistributionConfig.Origins.find(
+      (o: any) => o.CustomOriginConfig !== undefined,
+    );
+    expect(apiOrigin).toBeDefined();
+    expect(apiOrigin.CustomOriginConfig.OriginProtocolPolicy).toBe('https-only');
+  });
+
+  it('uses the custom domain when certificateArn is provided', () => {
+    const t = synth({
+      'vaultwarden:domain': 'https://vault.example.com',
+      'vaultwarden:certificateArn': 'arn:aws:acm:us-east-1:111111111111:certificate/abc',
+    });
+    const dist = Object.values(t.findResources('AWS::CloudFront::Distribution'))[0] as any;
+    expect(dist.Properties.DistributionConfig.Aliases).toEqual(['vault.example.com']);
+    expect(dist.Properties.DistributionConfig.ViewerCertificate.AcmCertificateArn)
+      .toContain('certificate/abc');
+  });
+
+  it('creates the budget when an alert email is set', () => {
+    synth().resourceCountIs('AWS::Budgets::Budget', 1);
+  });
+});

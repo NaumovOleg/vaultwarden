@@ -1,87 +1,126 @@
 import * as cdk from 'aws-cdk-lib';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
+import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
-import { Application } from './constructs/application';
-import { Backup } from './constructs/backup';
 import { CostGuard } from './constructs/cost-guard';
-import { Storage } from './constructs/storage';
 
 export class VaultwardenStack extends cdk.Stack {
+  public readonly table!: dynamodb.Table;
+  public readonly attachmentsBucket!: s3.Bucket;
+  public readonly staticBucket!: s3.Bucket;
+  public readonly iconsBucket!: s3.Bucket;
+  public readonly handler!: lambda.NodejsFunction;
+  public readonly api!: cdk.aws_apigatewayv2.HttpApi;
+  public readonly distribution!: cloudfront.Distribution;
+
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    const storage = new Storage(this, 'Storage');
-
-    new cdk.CfnOutput(this, 'BackupBucketName', { value: storage.backupBucket.bucketName });
-
     const alertEmail = this.node.tryGetContext('vaultwarden:alertEmail');
 
-    // Both the backup-failure alarm and the budget are conditional on this
-    // address, because an SNS subscription or a CfnBudget subscriber with an
-    // empty address fails at deploy time. That conditional is correct; what is
-    // not acceptable is it being silent. cdk.json ships the key blank, so the
-    // default synthesis has no alarm and no budget at all — and the backup
-    // bucket expires objects after 90 days, so a nightly backup that starts
-    // failing is invisible until the last good snapshot has already expired.
-    if (!alertEmail) {
+    // The budget is conditional on an email address because a CfnBudget
+    // subscriber with an empty address fails at deploy time.
+    if (alertEmail) {
+      new CostGuard(this, 'CostGuard', { monthlyLimitUsd: 1, notifyEmail: alertEmail });
+    } else {
       cdk.Annotations.of(this).addWarning(
-        'vaultwarden:alertEmail is not set: this stack synthesises with NO backup-failure ' +
-        'alarm, NO SNS topic and NO AWS Budgets cost alert. A failing nightly backup will be ' +
-        'silent, and the S3 lifecycle rule expires the last good snapshot after 90 days. Set ' +
-        'it in cdk.json or pass --context vaultwarden:alertEmail=you@example.com.',
+        'vaultwarden:alertEmail is not set: this stack synthesises with NO AWS Budgets ' +
+        'cost alert. Set it in cdk.json or pass --context vaultwarden:alertEmail=you@example.com.',
       );
     }
 
-    new Backup(this, 'Backup', {
-      vpc: storage.vpc,
-      fileSystem: storage.fileSystem,
-      accessPoint: storage.accessPoint,
-      bucket: storage.backupBucket,
-      alertEmail,
+    // Single-table design (see .planning/research/ARCHITECTURE.md). RETAIN:
+    // this table holds the user's vault, and must survive a stack destroy.
+    this.table = new dynamodb.Table(this, 'VaultTable', {
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
-    if (alertEmail) {
-      new CostGuard(this, 'CostGuard', { monthlyLimitUsd: 1, notifyEmail: alertEmail });
-    }
+    // Regenerable caches, not data — safe to destroy with the stack.
+    this.attachmentsBucket = new s3.Bucket(this, 'AttachmentsBucket', {
+      versioned: true,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+    });
+    this.staticBucket = new s3.Bucket(this, 'StaticWebvaultBucket', {
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+    });
+    this.iconsBucket = new s3.Bucket(this, 'IconsBucket', {
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      autoDeleteObjects: true,
+    });
 
+    const version = this.node.tryGetContext('vaultwarden:version') ?? '1.0.0-dev';
     const domain = this.node.tryGetContext('vaultwarden:domain') ?? 'https://localhost';
-    // ACM certificate for the custom domain, referenced from us-east-1 (the
-    // region CloudFront requires for alternate names). Imported by ARN rather
-    // than issued here: issuance is a manual DNS-validation step in another
-    // region. See cdk.json.
+    const signupsAllowed = String(
+      this.node.tryGetContext('vaultwarden:signupsAllowed') ?? 'false',
+    );
+
+    this.handler = new lambda.NodejsFunction(this, 'Handler', {
+      entry: 'src/handler.ts',
+      runtime: cdk.aws_lambda.Runtime.NODEJS_22_X,
+      memorySize: 512,
+      timeout: cdk.Duration.seconds(30),
+      environment: {
+        VERSION: version,
+        SIGNUPS_ALLOWED: signupsAllowed,
+        DEFAULT_DOMAIN: new URL(domain).hostname,
+      },
+    });
+    this.table.grantReadData(this.handler);
+
+    this.api = new cdk.aws_apigatewayv2.HttpApi(this, 'Api', {
+      // Catch-all: every request reaches the Lambda, the router decides.
+      defaultIntegration: new cdk.aws_apigatewayv2_integrations.HttpLambdaIntegration(
+        'DefaultIntegration',
+        this.handler,
+      ),
+    });
+
     const certificateArn = this.node.tryGetContext('vaultwarden:certificateArn');
     const certificate = certificateArn
       ? acm.Certificate.fromCertificateArn(this, 'DomainCertificate', certificateArn)
       : undefined;
     const domainNames = certificate ? [new URL(domain).hostname] : undefined;
-    const imageTag = this.node.tryGetContext('vaultwarden:imageTag') ?? '1.37.1-alpine';
-    // The 2FA-lockout escape hatch (README §10). Blank by default in cdk.json;
-    // set via --context vaultwarden:adminToken=... for a temporary deployment,
-    // then redeploy without it.
-    const adminToken = this.node.tryGetContext('vaultwarden:adminToken');
-    // Normalised to a string here rather than in the construct so that a JSON
-    // `true` in cdk.json and a CLI `--context vaultwarden:signupsAllowed=true`
-    // (always a string) mean the same thing. Anything that is not exactly
-    // "true" leaves registration closed — the fail-closed direction.
-    const signupsAllowed = String(
-      this.node.tryGetContext('vaultwarden:signupsAllowed') ?? 'false',
-    );
 
-    const application = new Application(this, 'Application', {
-      vpc: storage.vpc,
-      fileSystem: storage.fileSystem,
-      accessPoint: storage.accessPoint,
-      domain,
+    const apiOrigin = this.apiBehavior(this.api);
+    this.distribution = new cloudfront.Distribution(this, 'Distribution', {
+      defaultRootObject: 'index.html',
       certificate,
       domainNames,
-      imageTag,
-      adminToken,
-      signupsAllowed,
+      defaultBehavior: {
+        origin: origins.S3BucketOrigin.withOriginAccessControl(this.staticBucket),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      },
+      additionalBehaviors: {
+        '/api/*': apiOrigin,
+        '/identity/*': apiOrigin,
+        '/icons/*': apiOrigin,
+        '/alive': apiOrigin,
+        '/now': apiOrigin,
+      },
     });
 
     new cdk.CfnOutput(this, 'CdnDomainName', {
-      value: `https://${application.distribution.distributionDomainName}`,
+      value: `https://${this.distribution.distributionDomainName}`,
       description: 'Public URL. Put this in cdk.json as vaultwarden:domain, then redeploy.',
     });
+  }
+
+  private apiBehavior(api: cdk.aws_apigatewayv2.HttpApi): cloudfront.BehaviorOptions {
+    return {
+      origin: new origins.HttpOrigin(api.apiEndpoint.replace(/^https?:\/\//, '')),
+      viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+    };
   }
 }
