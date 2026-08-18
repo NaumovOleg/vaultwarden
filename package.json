@@ -10,7 +10,8 @@
     "test": "jest",
     "build": "tsc",
     "synth": "cdk synth",
-    "webvault": "bash scripts/fetch-webvault.sh"
+    "webvault": "bash scripts/fetch-webvault.sh",
+    "e2e:auth": "bash scripts/e2e-auth.sh"
   },
   "keywords": [],
   "author": "",

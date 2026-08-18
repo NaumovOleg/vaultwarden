@@ -180,13 +180,16 @@ function authenticatedResponse(user: UserItem, pair: { accessToken: string; refr
 }
 
 async function upsertDevice(store: Store, user: UserItem, form: Map<string, string>, deviceId: string): Promise<void> {
+  const existing = await store.getDevice(user.id, deviceId);
+  const now = new Date().toISOString();
   const device: DeviceItem = {
     pk: `USER#${user.id}`,
     sk: `DEV#${deviceId}`,
     name: form.get('devicename') ?? null,
     type: Number(form.get('devicetype') ?? 0),
     pushToken: form.get('devicepushtoken') ?? null,
-    lastUsed: new Date().toISOString(),
+    creationDate: existing?.creationDate ?? now,
+    lastUsed: now,
   };
   await store.upsertDevice(device);
 }

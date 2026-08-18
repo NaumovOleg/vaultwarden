@@ -36,6 +36,7 @@ export interface DeviceItem {
   name: string | null;
   type: number;
   pushToken: string | null;
+  creationDate: string;
   lastUsed: string;
 }
 

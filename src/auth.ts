@@ -1,5 +1,6 @@
 import { newToken, verifyPassword as ctVerify } from './crypto';
 import { BitwardenError } from './errors';
+import type { RouteContext } from './router';
 import type { SessionItem, Store, UserItem } from './store';
 
 export const ACCESS_TTL_SECONDS = 3600;
@@ -52,13 +53,32 @@ export async function issueSession(store: Store, user: UserItem, deviceId: strin
 }
 
 // Validates an access token: exists, type access, user exists, stamp matches.
-// Returns the session or null. Used by Plan 03's Bearer middleware too.
+// A stamp mismatch kills the session (revocation). Returns the session or null.
 export async function verifyAccessToken(store: Store, token: string): Promise<SessionItem | null> {
   const session = await store.getSession(token);
   if (!session || session.type !== 'access') return null;
   const user = await store.getUser(session.userId);
-  if (!user || user.securityStamp !== session.stamp) return null;
+  if (!user || user.securityStamp !== session.stamp) {
+    await store.deleteSession(token);
+    return null;
+  }
   return session;
+}
+
+// Bearer middleware: parses `Authorization: Bearer <token>` and resolves the
+// session+user. Missing/invalid/revoked → null (handler answers 401).
+export async function authenticate(
+  store: Store,
+  ctx: Pick<RouteContext, 'headers'>,
+): Promise<{ user: UserItem; session: SessionItem } | null> {
+  const header = ctx.headers['authorization'] ?? '';
+  const match = /^Bearer\s+(.+)$/i.exec(header);
+  if (!match) return null;
+  const session = await verifyAccessToken(store, match[1]);
+  if (!session) return null;
+  const user = await store.getUser(session.userId);
+  if (!user) return null;
+  return { user, session };
 }
 
 // Constant-time verification of the client hash against the stored wrap.

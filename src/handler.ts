@@ -1,9 +1,11 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResult } from 'aws-lambda';
 import { config, alive, now, version } from './endpoints/misc';
 import { register, prelogin, token, endsession } from './endpoints/identity';
+import { deviceList, deviceById, deviceRegisterToken, deviceClearToken } from './endpoints/devices';
 import { BitwardenError, internalError, notFound, toErrorBody } from './errors';
 import { match, Route, RouteContext } from './router';
 import { Store, MemoryStore } from './store';
+import { authenticate } from './auth';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' };
 
@@ -25,6 +27,12 @@ const defaultRoutes: Route[] = [
   { method: 'POST', pattern: '/api/accounts/prelogin', handler: prelogin },
   { method: 'POST', pattern: '/identity/connect/token', handler: token },
   { method: 'POST', pattern: '/identity/connect/endsession', handler: endsession },
+  { method: 'GET', pattern: '/api/devices', handler: deviceList, auth: true },
+  { method: 'GET', pattern: '/api/devices/identifier/:deviceId', handler: deviceById, auth: true },
+  { method: 'PUT', pattern: '/api/devices/identifier/:deviceId/token', handler: deviceRegisterToken, auth: true },
+  { method: 'POST', pattern: '/api/devices/identifier/:deviceId/token', handler: deviceRegisterToken, auth: true },
+  { method: 'PUT', pattern: '/api/devices/identifier/:deviceId/clear-token', handler: deviceClearToken, auth: true },
+  { method: 'POST', pattern: '/api/devices/identifier/:deviceId/clear-token', handler: deviceClearToken, auth: true },
 ];
 
 function json(statusCode: number, body: string): APIGatewayProxyResult {
@@ -77,8 +85,19 @@ export function createHandler(routes: Route[], deps: Deps = defaultDeps) {
       if (!route) {
         result = json(notFound().status, toErrorBody(notFound()));
       } else {
-        const ctx = parseBody(event);
-        result = (await route.handler(route.params, { ...ctx, store: deps.store })) as APIGatewayProxyResult;
+        const ctx: RouteContext = { ...parseBody(event), store: deps.store };
+        if (route.auth) {
+          const authn = await authenticate(deps.store, ctx);
+          if (!authn) {
+            result = { statusCode: 401, headers: JSON_HEADERS, body: '{"Message":"Unauthorized"}' };
+          } else {
+            ctx.user = authn.user;
+            ctx.session = authn.session;
+            result = (await route.handler(route.params, ctx)) as APIGatewayProxyResult;
+          }
+        } else {
+          result = (await route.handler(route.params, ctx)) as APIGatewayProxyResult;
+        }
       }
     } catch (err) {
       if (err instanceof BitwardenError) {

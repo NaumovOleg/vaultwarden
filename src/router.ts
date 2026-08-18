@@ -1,4 +1,4 @@
-import type { Store } from './store';
+import type { SessionItem, Store, UserItem } from './store';
 
 export interface Route {
   method: string;
@@ -14,11 +14,14 @@ export interface RouteContext {
   bodyJson: Record<string, any>;
   headers: Record<string, string>;
   sourceIp: string;
+  user?: UserItem;
+  session?: SessionItem;
 }
 
 export interface Match {
   handler: Route['handler'];
   params: Record<string, string>;
+  auth?: boolean;
 }
 
 // pattern supports exact paths and `:param` segments; exact match wins over
@@ -29,7 +32,7 @@ export function match(
   routes: Route[],
 ): Match | null {
   const exact = routes.find((r) => r.method === method && r.pattern === path);
-  if (exact) return { handler: exact.handler, params: {} };
+  if (exact) return { handler: exact.handler, params: {}, auth: exact.auth };
 
   for (const route of routes) {
     if (route.method !== method || !route.pattern.includes(':')) continue;
@@ -43,7 +46,7 @@ export function match(
       if (p.startsWith(':')) params[p.slice(1)] = decodeURIComponent(pathSegments[i]);
       else if (p !== pathSegments[i]) { ok = false; break; }
     }
-    if (ok) return { handler: route.handler, params };
+    if (ok) return { handler: route.handler, params, auth: route.auth };
   }
   return null;
 }
