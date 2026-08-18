@@ -62,7 +62,9 @@ aws s3 mb s3://vaultwarden-static-602101700579 --region eu-west-1
 npm ci
 npm run webvault   # pins + verifies + extracts the Web Vault into static/
 npx cdk deploy
-aws s3 sync static s3://vaultwarden-static-602101700579   # web vault + accept pages
+# web vault content is served from the bucket ROOT (index.html must be at /)
+aws s3 sync static/webvault s3://vaultwarden-static-602101700579
+aws s3 sync static --exclude 'webvault/**' s3://vaultwarden-static-602101700579
 ```
 
 The static bucket is deliberately **external to the stack** (imported by
