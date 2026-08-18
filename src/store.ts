@@ -340,7 +340,7 @@ export class DynamoStore implements Store {
       Limit: 1,
     }));
     if (!res.Items?.length) return null;
-    const userId = res.Items[0].userId as string;
+    const userId = res.Items[0].id as string;
     return this.getUserByUserId(userId);
   }
 
