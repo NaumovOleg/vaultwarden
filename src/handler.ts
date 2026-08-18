@@ -115,7 +115,7 @@ import {
 } from './endpoints/emergency-access';
 import { BitwardenError, internalError, notFound, toErrorBody } from './errors';
 import { match, Route, RouteContext } from './router';
-import { Store, MemoryStore } from './store';
+import { Store, MemoryStore, DynamoStore } from './store';
 import { MemoryObjectStore, S3ObjectStore, type ObjectStore } from './objects';
 import { authenticate } from './auth';
 
@@ -133,7 +133,13 @@ function defaultObjects(): ObjectStore {
     : new MemoryObjectStore();
 }
 
-const defaultDeps: Deps = { store: new MemoryStore(), objects: defaultObjects() };
+const defaultDeps: Deps = {
+  // The Lambda must use the real table: MemoryStore dies with the container and
+  // every cold start sees an empty vault (401s, lost data). Dev server selects
+  // via VAULT_TABLE too, but the Lambda entry can't rely on that alone.
+  store: process.env.VAULT_TABLE ? new DynamoStore(process.env.VAULT_TABLE) : new MemoryStore(),
+  objects: defaultObjects(),
+};
 
 export const defaultRoutes: Route[] = [
   { method: 'GET', pattern: '/alive', handler: alive },

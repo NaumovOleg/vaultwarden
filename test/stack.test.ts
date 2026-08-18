@@ -128,7 +128,7 @@ describe('VaultwardenStack', () => {
     // POST/PUT/DELETE must reach the API — CloudFront kills them with 403
     // ("supports only cachable requests") unless AllowedMethods includes them.
     for (const b of behaviors) {
-      expect(b.AllowedMethods.Items).toEqual(
+      expect(b.AllowedMethods).toEqual(
         expect.arrayContaining(['GET', 'HEAD', 'OPTIONS', 'PUT', 'PATCH', 'POST', 'DELETE']),
       );
     }
