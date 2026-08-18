@@ -179,6 +179,10 @@ export async function orgDelete(params: Record<string, string>, ctx: RouteContex
   const { org } = await requireOrg(ctx, params.id, 0);
   const collections = await ctx.store.listCollectionsForOrg(org.id);
   for (const col of collections) await ctx.store.deleteCollection(org.id, col.id);
+  for (const cipher of await ctx.store.listOrgCiphers(org.id)) {
+    await ctx.objects.deletePrefix(`attachments/${cipher.id}/`);
+    await ctx.store.deleteOrgCipher(org.id, cipher.id);
+  }
   await ctx.store.deleteOrganization(org.id);
   return json(200, {});
 }

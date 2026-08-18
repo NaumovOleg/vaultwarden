@@ -119,6 +119,17 @@ export interface CipherItem {
   fields: { name: string | null; value: string | null; type: number; linkedId: number | null }[] | null;
   passwordHistory: unknown[] | null;
   attachments: AttachmentItem[] | null;
+  collectionIds: string[]; // org ciphers only (phase 5 plan 03)
+}
+
+// Link row: pk ORGCOLL#{orgId}#{collectionId}, sk CIPHER#{cipherId} — maps
+// org ciphers to collections without an index on the cipher row itself.
+export interface OrgCollLink {
+  pk: string;
+  sk: string;
+  orgId: string;
+  collectionId: string;
+  cipherId: string;
 }
 
 export interface FolderItem {
@@ -230,6 +241,12 @@ export interface Store {
   getCipher(userId: string, cipherId: string): Promise<CipherItem | null>;
   listCiphers(userId: string): Promise<CipherItem[]>;
   deleteCipher(userId: string, cipherId: string): Promise<void>;
+  listCiphersForUser(userId: string): Promise<CipherItem[]>;
+  getOrgCipher(orgId: string, cipherId: string): Promise<CipherItem | null>;
+  listOrgCiphers(orgId: string): Promise<CipherItem[]>;
+  setOrgCipherCollections(orgId: string, cipherId: string, collectionIds: string[]): Promise<void>;
+  listCollectionCipherIds(orgId: string, collectionId: string): Promise<string[]>;
+  deleteOrgCipher(orgId: string, cipherId: string): Promise<void>;
   putFolder(folder: FolderItem): Promise<void>;
   getFolder(userId: string, folderId: string): Promise<FolderItem | null>;
   listFolders(userId: string): Promise<FolderItem[]>;
@@ -469,6 +486,108 @@ export class DynamoStore implements Store {
     }));
   }
 
+  async listCiphersForUser(userId: string): Promise<CipherItem[]> {
+    const personal = await this.listCiphers(userId);
+    const out = [...personal];
+    const seen = new Set(out.map((c) => c.id));
+    const memberships = await this.listOrganizationsForUser(userId);
+    for (const m of memberships) {
+      if (m.status < 2) continue;
+      const org = await this.getOrganization(m.orgId);
+      if (!org) continue;
+      const canAll = m.type <= 1;
+      const collections = canAll
+        ? await this.listCollectionsForOrg(m.orgId)
+        : (await this.listCollectionsForOrg(m.orgId)).filter(
+            (col) => col.users.length === 0 || col.users.some((u) => u.id === userId),
+          );
+      for (const col of collections) {
+        for (const cipherId of await this.listCollectionCipherIds(col.organizationId, col.id)) {
+          if (seen.has(cipherId)) continue;
+          const cipher = await this.getOrgCipher(col.organizationId, cipherId);
+          if (cipher) {
+            out.push(cipher);
+            seen.add(cipherId);
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  async getOrgCipher(orgId: string, cipherId: string): Promise<CipherItem | null> {
+    const res = await this.db.send(new GetCommand({
+      TableName: this.table,
+      Key: { pk: `CIPHER#${orgId}#${cipherId}`, sk: 'CIPHER' },
+    }));
+    return (res.Item as CipherItem | undefined) ?? null;
+  }
+
+  async listOrgCiphers(orgId: string): Promise<CipherItem[]> {
+    const res = await this.db.send(new QueryCommand({
+      TableName: this.table,
+      KeyConditionExpression: 'begins_with(pk, :pk)',
+      ExpressionAttributeValues: { ':pk': `ORGCOLL#${orgId}#` },
+    }));
+    const ids = new Set<string>();
+    for (const link of (res.Items as OrgCollLink[] | undefined) ?? []) ids.add(link.cipherId);
+    const out: CipherItem[] = [];
+    for (const cipherId of ids) {
+      const cipher = await this.getOrgCipher(orgId, cipherId);
+      if (cipher) out.push(cipher);
+    }
+    return out;
+  }
+
+  async setOrgCipherCollections(orgId: string, cipherId: string, collectionIds: string[]): Promise<void> {
+    const cipher = await this.getOrgCipher(orgId, cipherId);
+    if (!cipher) return;
+    const oldIds = cipher.collectionIds ?? [];
+    for (const colId of oldIds) {
+      if (!collectionIds.includes(colId)) {
+        await this.db.send(new DeleteCommand({
+          TableName: this.table,
+          Key: { pk: `ORGCOLL#${orgId}#${colId}`, sk: `CIPHER#${cipherId}` },
+        }));
+      }
+    }
+    for (const colId of collectionIds) {
+      if (!oldIds.includes(colId)) {
+        await this.db.send(new PutCommand({
+          TableName: this.table,
+          Item: { pk: `ORGCOLL#${orgId}#${colId}`, sk: `CIPHER#${cipherId}`, orgId, collectionId: colId, cipherId },
+        }));
+      }
+    }
+    await this.db.send(new PutCommand({
+      TableName: this.table,
+      Item: { ...cipher, collectionIds, revisionDate: new Date().toISOString() },
+    }));
+  }
+
+  async listCollectionCipherIds(orgId: string, collectionId: string): Promise<string[]> {
+    const res = await this.db.send(new QueryCommand({
+      TableName: this.table,
+      KeyConditionExpression: 'pk = :pk AND begins_with(sk, :sk)',
+      ExpressionAttributeValues: { ':pk': `ORGCOLL#${orgId}#${collectionId}`, ':sk': 'CIPHER#' },
+    }));
+    return ((res.Items as OrgCollLink[] | undefined) ?? []).map((l) => l.cipherId);
+  }
+
+  async deleteOrgCipher(orgId: string, cipherId: string): Promise<void> {
+    const cipher = await this.getOrgCipher(orgId, cipherId);
+    for (const colId of cipher?.collectionIds ?? []) {
+      await this.db.send(new DeleteCommand({
+        TableName: this.table,
+        Key: { pk: `ORGCOLL#${orgId}#${colId}`, sk: `CIPHER#${cipherId}` },
+      }));
+    }
+    await this.db.send(new DeleteCommand({
+      TableName: this.table,
+      Key: { pk: `CIPHER#${orgId}#${cipherId}`, sk: 'CIPHER' },
+    }));
+  }
+
   async putFolder(folder: FolderItem): Promise<void> {
     await this.db.send(new PutCommand({ TableName: this.table, Item: folder }));
   }
@@ -661,7 +780,8 @@ export class DynamoStore implements Store {
     for (const m of memberships) {
       const cols = await this.listCollectionsForOrg(m.orgId);
       for (const col of cols) {
-        if (col.users.length === 0 || col.users.some((u) => u.id === userId)) out.push(col);
+        // owner/admin see every org collection regardless of per-user rows
+        if (m.type <= 1 || col.users.length === 0 || col.users.some((u) => u.id === userId)) out.push(col);
       }
     }
     return out;
@@ -700,6 +820,7 @@ export class MemoryStore implements Store {
   private allOrgUsers: OrgUserItem[] = [];
   private allCollections: CollectionItem[] = [];
   private allPolicies: PolicyItem[] = [];
+  private allOrgLinks: OrgCollLink[] = [];
 
   async getUserByEmail(email: string): Promise<UserItem | null> {
     return this.usersByEmail.get(email.toLowerCase()) ?? null;
@@ -818,6 +939,69 @@ export class MemoryStore implements Store {
     this.allCiphers = this.allCiphers.filter((c) => c.pk !== `CIPHER#${userId}#${cipherId}`);
   }
 
+  async listCiphersForUser(userId: string): Promise<CipherItem[]> {
+    const personal = await this.listCiphers(userId);
+    const out = [...personal];
+    const seen = new Set(out.map((c) => c.id));
+    const memberships = await this.listOrganizationsForUser(userId);
+    for (const m of memberships) {
+      if (m.status < 2) continue;
+      const collections = m.type <= 1
+        ? await this.listCollectionsForOrg(m.orgId)
+        : (await this.listCollectionsForOrg(m.orgId)).filter(
+            (col) => col.users.length === 0 || col.users.some((u) => u.id === userId),
+          );
+      for (const col of collections) {
+        const orgId = col.organizationId;
+        for (const cipherId of this.allOrgLinks
+          .filter((l) => l.orgId === orgId && l.collectionId === col.id)
+          .map((l) => l.cipherId)) {
+          if (seen.has(cipherId)) continue;
+          const cipher = this.allCiphers.find((c) => c.pk === `CIPHER#${orgId}#${cipherId}`);
+          if (cipher) {
+            out.push({ ...cipher });
+            seen.add(cipherId);
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  async getOrgCipher(orgId: string, cipherId: string): Promise<CipherItem | null> {
+    const found = this.allCiphers.find((c) => c.pk === `CIPHER#${orgId}#${cipherId}`);
+    return found ? { ...found } : null;
+  }
+
+  async listOrgCiphers(orgId: string): Promise<CipherItem[]> {
+    const ids = new Set(this.allOrgLinks.filter((l) => l.orgId === orgId).map((l) => l.cipherId));
+    return [...ids]
+      .map((id) => this.allCiphers.find((c) => c.pk === `CIPHER#${orgId}#${id}`))
+      .filter((c): c is CipherItem => Boolean(c))
+      .map((c) => ({ ...c }));
+  }
+
+  async setOrgCipherCollections(orgId: string, cipherId: string, collectionIds: string[]): Promise<void> {
+    const cipher = this.allCiphers.find((c) => c.pk === `CIPHER#${orgId}#${cipherId}`);
+    if (!cipher) return;
+    this.allOrgLinks = this.allOrgLinks.filter((l) => !(l.orgId === orgId && l.cipherId === cipherId));
+    for (const collectionId of collectionIds) {
+      this.allOrgLinks.push({ pk: `ORGCOLL#${orgId}#${collectionId}`, sk: `CIPHER#${cipherId}`, orgId, collectionId, cipherId });
+    }
+    this.allCiphers = this.allCiphers.map((c) =>
+      c.pk === cipher.pk ? { ...c, collectionIds, revisionDate: new Date().toISOString() } : c,
+    );
+  }
+
+  async listCollectionCipherIds(orgId: string, collectionId: string): Promise<string[]> {
+    return this.allOrgLinks.filter((l) => l.orgId === orgId && l.collectionId === collectionId).map((l) => l.cipherId);
+  }
+
+  async deleteOrgCipher(orgId: string, cipherId: string): Promise<void> {
+    this.allOrgLinks = this.allOrgLinks.filter((l) => !(l.orgId === orgId && l.cipherId === cipherId));
+    this.allCiphers = this.allCiphers.filter((c) => c.pk !== `CIPHER#${orgId}#${cipherId}`);
+  }
+
   async putFolder(folder: FolderItem): Promise<void> {
     this.allFolders = this.allFolders.filter((f) => f.pk !== folder.pk);
     this.allFolders.push({ ...folder });
@@ -930,7 +1114,7 @@ export class MemoryStore implements Store {
     const out: CollectionItem[] = [];
     for (const m of memberships) {
       for (const col of await this.listCollectionsForOrg(m.orgId)) {
-        if (col.users.length === 0 || col.users.some((u) => u.id === userId)) out.push({ ...col });
+        if (m.type <= 1 || col.users.length === 0 || col.users.some((u) => u.id === userId)) out.push({ ...col });
       }
     }
     return out;

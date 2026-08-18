@@ -56,7 +56,7 @@ async function cipherJson(item: CipherItem, object: 'cipher' | 'cipherDetails', 
     attachments,
     attachmentCount: item.attachments?.length ?? 0,
     organizationUseTotp: true,
-    collectionIds: [],
+    collectionIds: item.collectionIds ?? [],
     name: item.name,
     notes: item.notes,
     fields: item.fields,
@@ -79,6 +79,46 @@ async function cipherJson(item: CipherItem, object: 'cipher' | 'cipherDetails', 
 
 function str(v: unknown): string {
   return typeof v === 'string' ? v : '';
+}
+
+// Resolves a cipher to a row the caller may touch: personal, or an org cipher
+// the user can see (any accessible collection). canWrite = owner/admin or a
+// non-readOnly collection membership; org ciphers the user cannot see → 404.
+async function resolveCipher(
+  ctx: RouteContext,
+  cipherId: string,
+): Promise<{ item: CipherItem; orgId: string | null; canWrite: boolean }> {
+  const personal = await ctx.store.getCipher(ctx.user!.id, cipherId);
+  if (personal) return { item: personal, orgId: null, canWrite: true };
+  const memberships = await ctx.store.listOrganizationsForUser(ctx.user!.id);
+  for (const m of memberships) {
+    if (m.status < 2) continue;
+    const item = await ctx.store.getOrgCipher(m.orgId, cipherId);
+    if (!item) continue;
+    if (m.type <= 1) return { item, orgId: m.orgId, canWrite: true };
+    const cols = await ctx.store.listCollectionsForOrg(m.orgId);
+    let seen = false;
+    let canWrite = false;
+    for (const cid of item.collectionIds ?? []) {
+      const col = cols.find((c) => c.id === cid);
+      if (!col) continue;
+      const mine = col.users.find((u) => u.id === ctx.user!.id);
+      if (col.users.length === 0 || mine) {
+        seen = true;
+        if (!col.readOnly && !mine?.readOnly) canWrite = true;
+      }
+    }
+    if (seen) return { item, orgId: m.orgId, canWrite };
+  }
+  throw notFoundErr();
+}
+
+async function requireOrgAdmin(ctx: RouteContext, orgId: string) {
+  const member = await ctx.store.getOrgUser(orgId, ctx.user!.id);
+  if (!member || member.status < 2 || member.type > 1) {
+    throw new BitwardenError(403, 'Organization admin access required.');
+  }
+  return member;
 }
 
 function normalizeCreate(body: Record<string, any>): Omit<CipherItem, 'pk' | 'sk' | 'id' | 'createdAt'> {
@@ -130,20 +170,20 @@ function normalizeCreate(body: Record<string, any>): Omit<CipherItem, 'pk' | 'sk
       : null,
     passwordHistory: Array.isArray(body.passwordHistory) ? body.passwordHistory : null,
     attachments: null,
+    collectionIds: [],
   };
 }
 
 // GET /api/ciphers — non-deleted only
 export async function cipherList(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
-  const all = await ctx.store.listCiphers(ctx.user!.id);
+  const all = await ctx.store.listCiphersForUser(ctx.user!.id);
   const data = await Promise.all(all.filter((c) => c.deletedDate === null).map((c) => cipherJson(c, 'cipherDetails', ctx.objects)));
   return json(200, { object: 'list', data, continuationToken: null });
 }
 
 // GET /api/ciphers/{id} and /api/ciphers/{id}/details
 export async function cipherGet(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
-  const item = await ctx.store.getCipher(ctx.user!.id, params.cipherId);
-  if (!item) throw notFoundErr();
+  const { item } = await resolveCipher(ctx, params.cipherId);
   return json(200, await cipherJson(item, 'cipherDetails', ctx.objects));
 }
 
@@ -164,46 +204,55 @@ export async function cipherCreate(params: Record<string, string>, ctx: RouteCon
   return json(200, await cipherJson(item, 'cipher', ctx.objects));
 }
 
-// PUT|POST /api/ciphers/{id} — full replace
+// PUT|POST /api/ciphers/{id} — full replace (personal or org cipher with write access)
 export async function cipherUpdate(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
-  const existing = await ctx.store.getCipher(ctx.user!.id, params.cipherId);
-  if (!existing) throw notFoundErr();
-  const item: CipherItem = {
-    ...existing,
+  const { item, orgId, canWrite } = await resolveCipher(ctx, params.cipherId);
+  if (!canWrite) throw new BitwardenError(403, 'Insufficient permissions to edit this cipher.');
+  const updated: CipherItem = {
+    ...item,
     ...normalizeCreate(ctx.bodyJson),
-    pk: existing.pk,
+    pk: item.pk,
     sk: 'CIPHER',
-    id: existing.id,
-    creationDate: existing.creationDate,
+    id: item.id,
+    organizationId: item.organizationId,
+    creationDate: item.creationDate,
+    collectionIds: orgId
+      ? Array.isArray(ctx.bodyJson.collectionIds)
+        ? ctx.bodyJson.collectionIds.filter((s: unknown): s is string => typeof s === 'string')
+        : item.collectionIds
+      : [],
     revisionDate: new Date().toISOString(),
   };
-  await ctx.store.putCipher(item);
-  return json(200, await cipherJson(item, 'cipher', ctx.objects));
+  await ctx.store.putCipher(updated);
+  if (orgId && updated.collectionIds !== item.collectionIds) {
+    await ctx.store.setOrgCipherCollections(orgId, item.id, updated.collectionIds);
+  }
+  return json(200, await cipherJson(updated, 'cipher', ctx.objects));
 }
 
 // PUT|POST /api/ciphers/{id}/partial — merge login fields only (extension autofill)
 export async function cipherPartial(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
-  const existing = await ctx.store.getCipher(ctx.user!.id, params.cipherId);
-  if (!existing) throw notFoundErr();
+  const { item, canWrite } = await resolveCipher(ctx, params.cipherId);
+  if (!canWrite) throw new BitwardenError(403, 'Insufficient permissions to edit this cipher.');
   const login = ctx.bodyJson.login;
   const newLogin = {
-    username: login?.username !== undefined ? str(login?.username) : (existing.login?.username ?? null),
-    password: login?.password !== undefined ? str(login?.password) : (existing.login?.password ?? null),
+    username: login?.username !== undefined ? str(login?.username) : (item.login?.username ?? null),
+    password: login?.password !== undefined ? str(login?.password) : (item.login?.password ?? null),
     uris: Array.isArray(login?.uris)
       ? login.uris.map((u: any) => ({
           uri: str(u.uri),
           match: u.match === null || u.match === undefined ? null : Number(u.match),
         }))
-      : (existing.login?.uris ?? null),
-    totp: login?.totp !== undefined ? str(login?.totp) : (existing.login?.totp ?? null),
+      : (item.login?.uris ?? null),
+    totp: login?.totp !== undefined ? str(login?.totp) : (item.login?.totp ?? null),
     passwordRevisionDate:
       login?.passwordRevisionDate !== undefined
         ? str(login?.passwordRevisionDate)
-        : (existing.login?.passwordRevisionDate ?? null),
-    fido2Credentials: login?.fido2Credentials ?? existing.login?.fido2Credentials ?? null,
+        : (item.login?.passwordRevisionDate ?? null),
+    fido2Credentials: login?.fido2Credentials ?? item.login?.fido2Credentials ?? null,
   };
   const updated: CipherItem = {
-    ...existing,
+    ...item,
     login: newLogin,
     revisionDate: new Date().toISOString(),
   };
@@ -213,10 +262,10 @@ export async function cipherPartial(params: Record<string, string>, ctx: RouteCo
 
 // DELETE|POST|PUT /api/ciphers/{id} (+ /delete) — soft delete
 async function softDelete(ctx: RouteContext, cipherId: string): Promise<unknown> {
-  const existing = await ctx.store.getCipher(ctx.user!.id, cipherId);
-  if (!existing) throw notFoundErr();
+  const { item, canWrite } = await resolveCipher(ctx, cipherId);
+  if (!canWrite) throw new BitwardenError(403, 'Insufficient permissions to delete this cipher.');
   await ctx.store.putCipher({
-    ...existing,
+    ...item,
     deletedDate: new Date().toISOString(),
     revisionDate: new Date().toISOString(),
   });
@@ -229,10 +278,10 @@ export async function cipherDelete(params: Record<string, string>, ctx: RouteCon
 
 // PUT|POST /api/ciphers/{id}/restore
 export async function cipherRestore(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
-  const existing = await ctx.store.getCipher(ctx.user!.id, params.cipherId);
-  if (!existing) throw notFoundErr();
+  const { item, canWrite } = await resolveCipher(ctx, params.cipherId);
+  if (!canWrite) throw new BitwardenError(403, 'Insufficient permissions to restore this cipher.');
   await ctx.store.putCipher({
-    ...existing,
+    ...item,
     deletedDate: null,
     revisionDate: new Date().toISOString(),
   });
@@ -245,9 +294,11 @@ export async function cipherMove(params: Record<string, string>, ctx: RouteConte
   const idList: string[] = Array.isArray(ids) ? ids : params.cipherId ? [params.cipherId] : [];
   const folder = typeof folderId === 'string' && folderId !== '' ? folderId : null;
   for (const id of idList) {
-    const existing = await ctx.store.getCipher(ctx.user!.id, id);
-    if (!existing) continue;
-    await ctx.store.putCipher({ ...existing, folderId: folder, revisionDate: new Date().toISOString() });
+    const { item, orgId, canWrite } = await resolveCipher(ctx, id);
+    if (!canWrite) continue;
+    // org ciphers live outside the personal folder tree
+    const next = orgId ? { ...item } : { ...item, folderId: folder };
+    await ctx.store.putCipher({ ...next, revisionDate: new Date().toISOString() });
   }
   return json(200, {});
 }
@@ -257,8 +308,11 @@ export async function cipherPurge(params: Record<string, string>, ctx: RouteCont
   const ids: unknown[] = ctx.bodyJson.ids ?? [];
   for (const id of ids) {
     if (typeof id === 'string') {
+      const { orgId, canWrite } = await resolveCipher(ctx, id);
+      if (!canWrite) continue;
       await ctx.objects.deletePrefix(`attachments/${id}/`);
-      await ctx.store.deleteCipher(ctx.user!.id, id);
+      if (orgId) await ctx.store.deleteOrgCipher(orgId, id);
+      else await ctx.store.deleteCipher(ctx.user!.id, id);
     }
   }
   return json(200, {});
@@ -287,9 +341,8 @@ function badBody(message: string): BitwardenError {
 // POST /api/ciphers/{cipherId}/attachment/v2 — {key, fileName, fileSize?}
 // → {object:'attachment-fileUpload', attachmentId, url, fileUploadType:0, cipherResponse}.
 export async function attachmentCreateV2(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
-  const user = ctx.user!;
-  const item = await ctx.store.getCipher(user.id, params.cipherId);
-  if (!item) throw notFoundErr();
+  const { item, canWrite } = await resolveCipher(ctx, params.cipherId);
+  if (!canWrite) throw new BitwardenError(403, 'Insufficient permissions to add attachments.');
   const body = ctx.bodyJson;
   const fileName = typeof body.fileName === 'string' ? body.fileName : '';
   const key = typeof body.key === 'string' ? body.key : '';
@@ -340,8 +393,8 @@ async function storeUpload(ctx: RouteContext, item: CipherItem, attachmentId: st
 }
 
 export async function attachmentUpload(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
-  const item = await ctx.store.getCipher(ctx.user!.id, params.cipherId);
-  if (!item) throw notFoundErr();
+  const { item, canWrite } = await resolveCipher(ctx, params.cipherId);
+  if (!canWrite) throw new BitwardenError(403, 'Insufficient permissions to add attachments.');
   const updated = await storeUpload(ctx, item, params.attachmentId);
   return json(200, await cipherJson(updated, 'cipherDetails', ctx.objects));
 }
@@ -349,8 +402,8 @@ export async function attachmentUpload(params: Record<string, string>, ctx: Rout
 // Legacy single-call: POST /api/ciphers/{cipherId}/attachment (multipart
 // {key, data, fileName}) — create meta + upload in one call.
 export async function attachmentLegacy(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
-  const item = await ctx.store.getCipher(ctx.user!.id, params.cipherId);
-  if (!item) throw notFoundErr();
+  const { item, canWrite } = await resolveCipher(ctx, params.cipherId);
+  if (!canWrite) throw new BitwardenError(403, 'Insufficient permissions to add attachments.');
   const fields = parseBodyBytes(ctx.headers['content-type'] ?? '', ctx.bodyBytes);
   const fileName = fields.get('fileName')?.toString('utf-8') ?? '';
   const key = fields.get('key')?.toString('utf-8') ?? '';
@@ -384,9 +437,9 @@ export async function attachmentLegacy(params: Record<string, string>, ctx: Rout
 // GET /api/ciphers/{cipherId}/attachment/{attachmentId} — {object:'attachment',
 // id, url (fresh presigned), fileName, key, size, sizeName}.
 export async function attachmentGet(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
-  const item = await ctx.store.getCipher(ctx.user!.id, params.cipherId);
-  const att = item?.attachments?.find((a) => a.id === params.attachmentId);
-  if (!item || !att) throw notFoundErr();
+  const { item } = await resolveCipher(ctx, params.cipherId);
+  const att = item.attachments?.find((a) => a.id === params.attachmentId);
+  if (!att) throw notFoundErr();
   return json(200, {
     object: 'attachment',
     id: att.id,
@@ -400,8 +453,9 @@ export async function attachmentGet(params: Record<string, string>, ctx: RouteCo
 
 // DELETE|POST|PUT /api/ciphers/{cipherId}/attachment/{attachmentId} (+ /delete)
 async function attachmentDelete(ctx: RouteContext, cipherId: string, attachmentId: string): Promise<unknown> {
-  const item = await ctx.store.getCipher(ctx.user!.id, cipherId);
-  if (!item || !item.attachments?.some((a) => a.id === attachmentId)) throw notFoundErr();
+  const { item, canWrite } = await resolveCipher(ctx, cipherId);
+  if (!canWrite) throw new BitwardenError(403, 'Insufficient permissions to delete attachments.');
+  if (!item.attachments?.some((a) => a.id === attachmentId)) throw notFoundErr();
   const updated: CipherItem = {
     ...item,
     attachments: item.attachments.filter((a) => a.id !== attachmentId),
@@ -460,6 +514,106 @@ export async function cipherImport(params: Record<string, string>, ctx: RouteCon
   }
   await Promise.all([]);
   return json(200, {});
+}
+
+// PUT|POST /api/ciphers/{id}/share — move a personal cipher into an org.
+// Body (web vault): {collectionIds: [], collections: [{id, readOnly, hidePasswords}]}.
+// Client re-wraps the cipher key and sends it back in body.cipher.key.
+export async function cipherShare(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const body = ctx.bodyJson;
+  const collectionIds: string[] = Array.isArray(body.collectionIds)
+    ? body.collectionIds.filter((s: unknown): s is string => typeof s === 'string')
+    : [];
+  if (collectionIds.length === 0) throw badBody('collectionIds is required.');
+  const existing = await ctx.store.getCipher(ctx.user!.id, params.cipherId);
+  if (!existing) throw notFoundErr();
+  if (existing.organizationId) throw badBody('Cipher is already owned by an organization.');
+  const col = (await ctx.store.listCollectionsForUser(ctx.user!.id)).find((c) => c.id === collectionIds[0]);
+  if (!col) throw badBody('Collection not found.');
+  const orgId = col.organizationId;
+  const now = new Date().toISOString();
+  const moved: CipherItem = {
+    ...existing,
+    pk: `CIPHER#${orgId}#${existing.id}`,
+    organizationId: orgId,
+    collectionIds,
+    key: typeof body.cipher?.key === 'string' ? body.cipher.key : existing.key,
+    folderId: null,
+    revisionDate: now,
+  };
+  await ctx.store.deleteCipher(ctx.user!.id, existing.id);
+  await ctx.store.putCipher(moved);
+  await ctx.store.setOrgCipherCollections(orgId, existing.id, collectionIds);
+  return json(200, {});
+}
+
+// PUT|POST /api/ciphers/{id}/admin — owner/admin bypass edit of an org cipher.
+export async function cipherAdmin(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const body = ctx.bodyJson;
+  const memberships = await ctx.store.listOrganizationsForUser(ctx.user!.id);
+  for (const m of memberships) {
+    if (m.status < 2 || m.type > 1) continue;
+    const item = await ctx.store.getOrgCipher(m.orgId, params.cipherId);
+    if (!item) continue;
+    await requireOrgAdmin(ctx, m.orgId);
+    const collectionIds: string[] = Array.isArray(body.collectionIds)
+      ? body.collectionIds.filter((s: unknown): s is string => typeof s === 'string')
+      : item.collectionIds;
+    const updated: CipherItem = {
+      ...item,
+      ...normalizeCreate(body),
+      pk: item.pk,
+      sk: 'CIPHER',
+      id: item.id,
+      organizationId: m.orgId,
+      collectionIds,
+      revisionDate: new Date().toISOString(),
+    };
+    await ctx.store.putCipher(updated);
+    await ctx.store.setOrgCipherCollections(m.orgId, item.id, collectionIds);
+    return json(200, await cipherJson(updated, 'cipher', ctx.objects));
+  }
+  throw notFoundErr();
+}
+
+// PUT|POST /api/ciphers/{id}/collections (+ _v2) — {collectionIds} membership update.
+export async function cipherSetCollections(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const body = ctx.bodyJson;
+  const collectionIds: string[] = Array.isArray(body.collectionIds)
+    ? body.collectionIds.filter((s: unknown): s is string => typeof s === 'string')
+    : [];
+  const { item, orgId, canWrite } = await resolveCipher(ctx, params.cipherId);
+  if (!orgId) throw notFoundErr();
+  if (!canWrite) throw new BitwardenError(403, 'Insufficient permissions to change collections.');
+  await ctx.store.setOrgCipherCollections(orgId, item.id, collectionIds);
+  return json(200, {});
+}
+
+// GET /api/ciphers/organization-details?organizationId= (+ /:organizationId alias)
+// → org cipherDetails of collections the caller can access.
+export async function cipherOrganizationDetails(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const orgId = String(ctx.query.organizationId ?? params.organizationId ?? '');
+  if (orgId === '') throw badBody('organizationId is required.');
+  const member = await ctx.store.getOrgUser(orgId, ctx.user!.id);
+  if (!member || member.status < 2) throw notFoundErr();
+  const accessible = member.type <= 1
+    ? await ctx.store.listCollectionsForOrg(orgId)
+    : (await ctx.store.listCollectionsForOrg(orgId)).filter(
+        (col) => col.users.length === 0 || col.users.some((u) => u.id === ctx.user!.id),
+      );
+  const out: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+  for (const col of accessible) {
+    for (const cipherId of await ctx.store.listCollectionCipherIds(orgId, col.id)) {
+      if (seen.has(cipherId)) continue;
+      seen.add(cipherId);
+      const item = await ctx.store.getOrgCipher(orgId, cipherId);
+      if (item && item.deletedDate === null) {
+        out.push(await cipherJson(item, 'cipherDetails', ctx.objects));
+      }
+    }
+  }
+  return json(200, out);
 }
 
 export { cipherJson, sizeName };

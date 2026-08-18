@@ -38,6 +38,18 @@ import {
   memberAccept,
 } from '../src/endpoints/members';
 import { policyList, policyGet, policyUpdate } from '../src/endpoints/policies';
+import {
+  cipherList,
+  cipherGet,
+  cipherCreate,
+  cipherUpdate,
+  cipherDelete,
+  cipherRestore,
+  cipherShare,
+  cipherAdmin,
+  cipherSetCollections,
+  cipherOrganizationDetails,
+} from '../src/endpoints/ciphers';
 
 const PASSWORD = Buffer.from('client-hash').toString('base64');
 
@@ -83,6 +95,26 @@ const routes: Route[] = [
   { method: 'GET', pattern: '/api/organizations/:id/policies/:polType', handler: policyGet, auth: true },
   { method: 'PUT', pattern: '/api/organizations/:id/policies/:polType', handler: policyUpdate, auth: true },
   { method: 'POST', pattern: '/api/organizations/:id/policies/:polType', handler: policyUpdate, auth: true },
+  { method: 'GET', pattern: '/api/ciphers', handler: cipherList, auth: true },
+  { method: 'GET', pattern: '/api/ciphers/organization-details', handler: cipherOrganizationDetails, auth: true },
+  { method: 'GET', pattern: '/api/ciphers/organization-details/:organizationId', handler: cipherOrganizationDetails, auth: true },
+  { method: 'GET', pattern: '/api/ciphers/:cipherId', handler: cipherGet, auth: true },
+  { method: 'GET', pattern: '/api/ciphers/:cipherId/details', handler: cipherGet, auth: true },
+  { method: 'POST', pattern: '/api/ciphers', handler: cipherCreate, auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/:cipherId', handler: cipherUpdate, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/:cipherId', handler: cipherUpdate, auth: true },
+  { method: 'DELETE', pattern: '/api/ciphers/:cipherId', handler: cipherDelete, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/:cipherId/delete', handler: cipherDelete, auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/:cipherId/restore', handler: cipherRestore, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/:cipherId/restore', handler: cipherRestore, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/:cipherId/share', handler: cipherShare, auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/:cipherId/share', handler: cipherShare, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/:cipherId/admin', handler: cipherAdmin, auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/:cipherId/admin', handler: cipherAdmin, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/:cipherId/collections', handler: cipherSetCollections, auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/:cipherId/collections', handler: cipherSetCollections, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/:cipherId/collections_v2', handler: cipherSetCollections, auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/:cipherId/collections_v2', handler: cipherSetCollections, auth: true },
 ];
 
 function makeEnv() {
@@ -474,5 +506,132 @@ describe('organizations', () => {
     expect(bundle.policies).toHaveLength(1);
     expect(bundle.policies[0].type).toBe(4);
     expect(bundle.policies[0].enabled).toBe(true);
+  });
+
+  it('share: personal → org; member sees shared cipher; restricted collection stays hidden', async () => {
+    const env = makeEnv();
+    const at = await seed(env, 'owner@example.com');
+    const at2 = await seed(env, 'alice@example.com');
+    const orgId = await createOrg(env, at);
+    const aliceId = (await env.store.getUserByEmail('alice@example.com'))!.id;
+    const ownerId = (await env.store.getUserByEmail('owner@example.com'))!.id;
+
+    // invite + accept alice as a plain member
+    const inv = JSON.parse(
+      (await env.handler(
+        ev('POST', `/api/organizations/${orgId}/users/invite`, JSON.stringify({ emails: [{ email: 'alice@example.com', type: 2 }] }), at),
+      )).body as string,
+    );
+    const memberId = (await env.store.listOrgUsers(orgId)).find((m) => m.email === 'alice@example.com')!.id;
+    await env.handler(ev('POST', `/api/organizations/${orgId}/users/${memberId}/accept`, JSON.stringify({ token: inv.invites[0].accessToken }), at2));
+
+    // restricted collection (alice not in users) + read-only collection for alice
+    await env.handler(
+      ev('POST', `/api/organizations/${orgId}/collections`, JSON.stringify({ name: 'Restricted', users: [{ id: ownerId }] }), at),
+    );
+    await env.handler(
+      ev('POST', `/api/organizations/${orgId}/collections`, JSON.stringify({ name: 'RO', users: [{ id: aliceId, readOnly: true }] }), at),
+    );
+    const cols = await env.store.listCollectionsForOrg(orgId);
+    const teamVault = cols.find((c) => c.name === 'Team Vault')!;
+    const restricted = cols.find((c) => c.name === 'Restricted')!;
+    const ro = cols.find((c) => c.name === 'RO')!;
+    // empty users list = open to all members
+    await env.handler(ev('PUT', `/api/organizations/${orgId}/collections/${teamVault.id}`, JSON.stringify({ users: [] }), at));
+
+    // two personal ciphers: one → Team Vault (everyone), one → Restricted (owner only), one → RO
+    const mk = async (name: string) => {
+      const r = await env.handler(
+        ev('POST', '/api/ciphers', JSON.stringify({ type: 1, name, login: { username: 'u', password: 'p' } }), at),
+      );
+      return JSON.parse(r.body as string).id as string;
+    };
+    const sharedId = await mk('Shared to team');
+    const restrictedId = await mk('Owner only');
+    const roId = await mk('Read-only for alice');
+
+    expect(
+      (await env.handler(ev('POST', `/api/ciphers/${sharedId}/share`, JSON.stringify({ collectionIds: [teamVault.id] }), at))).statusCode,
+    ).toBe(200);
+    expect(
+      (await env.handler(ev('POST', `/api/ciphers/${restrictedId}/share`, JSON.stringify({ collectionIds: [restricted.id] }), at))).statusCode,
+    ).toBe(200);
+    expect(
+      (await env.handler(ev('POST', `/api/ciphers/${roId}/share`, JSON.stringify({ collectionIds: [ro.id] }), at))).statusCode,
+    ).toBe(200);
+
+    // owner: cipher left the personal partition, now an org cipher in the union
+    const ownerPersonal = await env.store.listCiphers(ownerId);
+    expect(ownerPersonal.map((c) => c.id)).not.toContain(sharedId);
+    const ownerList = JSON.parse((await env.handler(ev('GET', '/api/ciphers', '', at))).body as string);
+    const shared = ownerList.data.find((c: any) => c.id === sharedId);
+    expect(shared.organizationId).toBe(orgId);
+    expect(shared.collectionIds).toContain(teamVault.id);
+
+    // alice sees team+RO ciphers but not the restricted one
+    const aliceList = JSON.parse((await env.handler(ev('GET', '/api/ciphers', '', at2))).body as string);
+    const aliceIds = aliceList.data.map((c: any) => c.id);
+    expect(aliceIds).toContain(sharedId);
+    expect(aliceIds).toContain(roId);
+    expect(aliceIds).not.toContain(restrictedId);
+
+    const bundle = JSON.parse((await env.handler(ev('GET', '/api/sync', '', at2))).body as string);
+    expect(bundle.ciphers.map((c: any) => c.id)).toContain(sharedId);
+
+    // organization-details: alice sees only her collections' ciphers; owner all
+    const aliceOrg = JSON.parse(
+      (await env.handler(ev('GET', `/api/ciphers/organization-details?organizationId=${orgId}`, '', at2))).body as string,
+    );
+    expect(aliceOrg.map((c: any) => c.id).sort()).toEqual([sharedId, roId].sort());
+    const ownerOrg = JSON.parse(
+      (await env.handler(ev('GET', `/api/ciphers/organization-details?organizationId=${orgId}`, '', at))).body as string,
+    );
+    expect(ownerOrg.map((c: any) => c.id).sort()).toEqual([sharedId, restrictedId, roId].sort());
+
+    // alice (readOnly collection) cannot edit; owner can via /admin
+    expect(
+      (await env.handler(ev('PUT', `/api/ciphers/${roId}`, JSON.stringify({ type: 1, name: 'Hacked' }), at2))).statusCode,
+    ).toBe(403);
+    expect(
+      (await env.handler(ev('PUT', `/api/ciphers/${roId}/admin`, JSON.stringify({ type: 1, name: 'Renamed' }), at))).statusCode,
+    ).toBe(200);
+    const renamed = JSON.parse((await env.handler(ev('GET', `/api/ciphers/${roId}`, '', at2))).body as string);
+    expect(renamed.name).toBe('Renamed');
+    // alice can edit cipher in an open collection, but not in her readOnly one
+    expect(
+      (await env.handler(ev('PUT', `/api/ciphers/${sharedId}/collections_v2`, JSON.stringify({ collectionIds: [teamVault.id] }), at2))).statusCode,
+    ).toBe(200);
+    expect(
+      (await env.handler(ev('PUT', `/api/ciphers/${roId}/collections_v2`, JSON.stringify({ collectionIds: [] }), at2))).statusCode,
+    ).toBe(403);
+
+    // remove shared cipher from all collections → alice loses it; owner keeps it
+    expect(
+      (await env.handler(ev('PUT', `/api/ciphers/${sharedId}/collections_v2`, JSON.stringify({ collectionIds: [] }), at))).statusCode,
+    ).toBe(200);
+    const aliceList2 = JSON.parse((await env.handler(ev('GET', '/api/ciphers', '', at2))).body as string);
+    expect(aliceList2.data.map((c: any) => c.id)).not.toContain(sharedId);
+    const ownerOrg2 = JSON.parse(
+      (await env.handler(ev('GET', `/api/ciphers/organization-details?organizationId=${orgId}`, '', at))).body as string,
+    );
+    // unlinked org cipher is orphaned: hidden from org vault everywhere
+    expect(ownerOrg2.map((c: any) => c.id)).not.toContain(sharedId);
+    expect((await env.store.getOrgCipher(orgId, sharedId))?.collectionIds).toEqual([]);
+  });
+
+  it('org delete cascades org ciphers + attachments', async () => {
+    const env = makeEnv();
+    const at = await seed(env, 'owner@example.com');
+    const orgId = await createOrg(env, at);
+    const r = await env.handler(ev('POST', '/api/ciphers', JSON.stringify({ type: 1, name: 'Org candidate' }), at));
+    const cipherId = JSON.parse(r.body as string).id as string;
+    const col = (await env.store.listCollectionsForOrg(orgId))[0];
+    await env.handler(ev('POST', `/api/ciphers/${cipherId}/share`, JSON.stringify({ collectionIds: [col.id] }), at));
+    await env.objects.putObject(`attachments/${cipherId}/att1`, Buffer.from('x'));
+    expect(await env.store.listOrgCiphers(orgId)).toHaveLength(1);
+
+    await env.handler(ev('POST', `/api/organizations/${orgId}/delete`, '', at));
+    expect(await env.store.listOrgCiphers(orgId)).toHaveLength(0);
+    expect(env.objects.keys().filter((k) => k.startsWith('attachments/'))).toHaveLength(0);
   });
 });

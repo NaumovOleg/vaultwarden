@@ -158,7 +158,7 @@ export async function sync(params: Record<string, string>, ctx: RouteContext): P
 
   if (partial) return json(200, bundle);
 
-  const ciphers = await ctx.store.listCiphers(user.id);
+  const ciphers = await ctx.store.listCiphersForUser(user.id);
   const sends = await ctx.store.listSends(user.id);
   const collections = await ctx.store.listCollectionsForUser(user.id);
   return json(200, {
