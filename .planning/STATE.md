@@ -1,9 +1,9 @@
 # STATE.md — Project Memory
 
 ## Current Position
-- **Phase:** 7 (Hardening & Polish) — **code-complete** (plan 01: icons service + settings/domains + hibp stub; plan 02: error alarms + restore runbook + README; 144 tests green). **Deploy + human checks OWNER-RUN** — see `.planning/phases/07-hardening/02-SUMMARY.md` "Owner handoff".
-- **Next:** Phase 8 (Emergency Access & Extras: trust/accept/request/grant/takeover via surfaced tokens, avatar stubs, final compat regression) — OR owner deploy handoff for phases 6+7.
-- **Completed:** PROJECT.md, config, research (4 reports), FEATURES.md, REQUIREMENTS.md, ROADMAP.md, phases 1-7 (phase 6: 133 tests, phase 7: 144 tests green)
+- **Phase:** 8 (Emergency Access) — plan 01 **code-complete** (149 tests green). **Deploy + human checks OWNER-RUN** — see `.planning/phases/08-emergency-access/01-SUMMARY.md` "Owner handoff".
+- **Next:** final compatibility regression across all 4 clients (ROADMAP: user hands-on once deployed) — OR any remaining owner deploy handoffs for phases 6+7.
+- **Completed:** PROJECT.md, config, research (4 reports), FEATURES.md, REQUIREMENTS.md, ROADMAP.md, phases 1-8 (phase 8: 149 tests green)
 
 ## Project Facts
 - Full custom Bitwarden-compatible server: Node 22 Lambda + DynamoDB + S3, CDK v2 rewrite
@@ -45,5 +45,6 @@
 - Phase 6 plan 03 executed: commit (see log), 133 tests green. clearRememberedDevices on all three stamp rotations (password/kdf/security-stamp) — remembered-device 2FA bypass dies with sessions; e2e-vault.sh step 15 (enable TOTP → challenge → TOTP login → disable); 03-SUMMARY.md. Phase-6 deploy deferred to owner per standing policy.
 - Phase 7 plan 01 executed: commits 70d3c2e + 63f77b6, 142 tests green. icons.ts (normalized host → cached S3 miss → icons.bitwarden.net fetch → 24h cache; empty-object negative markers; ICONS_BUCKET env + grants + /icons route), ObjectStore.getObject added to both stores, RouteContext.icons, settings/domains GET+PUT/POST user override (UserItem.domainsOverride, 400 on garbage), hibp 404 stub.
 - Phase 7 plan 02 executed: commits dbee77d + wrap, 144 tests green. CloudWatch Lambda-Errors + API-5XX alarms → SNS email (gated on vaultwarden:alertEmail, stack tests assert both gated paths), docs/ops/backup-restore.md runbook (PITR restore → repoint VAULT_TABLE → TTL re-add → attachments version recovery → smoke checklist), README Backup+Monitoring sections, 02-SUMMARY.md. SDK E2E harness intentionally not added (bash e2e scripts are the harness). Phase-7 deploy deferred to owner per standing policy.
+- Phase 8 plan 01 executed: 149 tests green. Emergency access v1 (MISC-05): EmergencyAccessItem + EMERGTOKEN#/EMERGGRANTEE# GSI1 re-keying, src/endpoints/emergency-access.ts (18 routes: invite w/ surfaced token, reinvite, authed accept, confirm, update, delete, trusted/granted lists, detail, initiate w/ wait-time, approve/reject, view, takeover as full grantor session, password reset w/ stamp rotation, policies envelope), register emergencyAccessId+Token binding, static/ea-accept.html, e2e-vault.sh step 16, deleteUser trust-row cascade. 01-SUMMARY.md; avatar stubs + account-misc documented skips.
 - Phase 1 deploy deferred by owner decision ("write the whole project, then I deploy"). Same policy applies to every later phase's deploy task.
 - Phase 2 planned (3 plans); key execution-time verification required: exact `authenticated_response`/`twofactor_auth` field shapes from vaultwarden main `src/api/identity.rs`, and `password_iterations` default from `src/config.rs`.

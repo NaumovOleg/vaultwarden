@@ -60,8 +60,29 @@ export interface SessionItem {
   type: 'access' | 'refresh';
   stamp: string;
   expiresAt: number; // epoch seconds (DynamoDB TTL)
-  pairedAccess?: string; // on refresh items: the access token of the pair
-  pairedRefresh?: string; // on access items: the refresh token of the pair
+  pairedAccess: string | null;
+  pairedRefresh: string | null;
+}
+
+export interface EmergencyAccessItem {
+  pk: string; // EMERG#{grantorId}#{itemId}
+  sk: string; // EMERG
+  itemId: string;
+  grantorId: string;
+  granteeId: string | null; // null until accepted
+  email: string; // invited address
+  status: number; // 0 invited | 1 accepted | 2 confirmed | 3 initiated | 4 approved
+  type: number; // 0 viewer | 1 manager
+  waitTimeDays: number;
+  token: string | null; // accept token; null once accepted
+  name: string | null;
+  encryptedPrivateKey: string | null; // grantee's (at accept)
+  publicKey: string | null; // grantee's (at accept)
+  encryptedKey: string | null; // grantor's vault key (at confirm), grantee-pubkey-encrypted
+  creationDate: string;
+  revisionDate: string;
+  GSI1PK: string; // EMERGTOKEN#{token} while invited | EMERGGRANTEE#{granteeId} once accepted
+  GSI1SK: string; // EMERG
 }
 
 export interface TwoFactorItem {
@@ -230,6 +251,12 @@ export interface Store {
   getUserByUserId(userId: string): Promise<UserItem | null>;
   listDevices(userId: string): Promise<DeviceItem[]>;
   clearRememberedDevices(userId: string): Promise<void>;
+  putEmergencyAccess(item: EmergencyAccessItem): Promise<void>;
+  getEmergencyAccess(grantorId: string, itemId: string): Promise<EmergencyAccessItem | null>;
+  getEmergencyAccessByToken(token: string): Promise<EmergencyAccessItem | null>;
+  deleteEmergencyAccess(grantorId: string, itemId: string): Promise<void>;
+  listEmergencyAccessForGrantor(grantorId: string): Promise<EmergencyAccessItem[]>;
+  listEmergencyAccessForGrantee(granteeId: string): Promise<EmergencyAccessItem[]>;
   getDevice(userId: string, deviceId: string): Promise<DeviceItem | null>;
   upsertDevice(device: DeviceItem): Promise<void>;
   putSession(session: SessionItem): Promise<void>;
@@ -345,6 +372,57 @@ export class DynamoStore implements Store {
     return (res.Items as DeviceItem[] | undefined) ?? [];
   }
 
+  async putEmergencyAccess(item: EmergencyAccessItem): Promise<void> {
+    await this.db.send(new PutCommand({ TableName: this.table, Item: item }));
+  }
+
+  async getEmergencyAccess(grantorId: string, itemId: string): Promise<EmergencyAccessItem | null> {
+    const res = await this.db.send(new GetCommand({
+      TableName: this.table,
+      Key: { pk: `EMERG#${grantorId}#${itemId}`, sk: 'EMERG' },
+    }));
+    return (res.Item as EmergencyAccessItem | undefined) ?? null;
+  }
+
+  // Invite tokens are only live while status 0; accept/register re-key the row
+  // to EMERGGRANTEE#..., which kills the token lookup (single GSI1PK per row).
+  async getEmergencyAccessByToken(token: string): Promise<EmergencyAccessItem | null> {
+    const res = await this.db.send(new QueryCommand({
+      TableName: this.table,
+      IndexName: 'GSI1',
+      KeyConditionExpression: 'GSI1PK = :pk',
+      ExpressionAttributeValues: { ':pk': `EMERGTOKEN#${token}` },
+      Limit: 1,
+    }));
+    return (res.Items?.[0] as EmergencyAccessItem | undefined) ?? null;
+  }
+
+  async deleteEmergencyAccess(grantorId: string, itemId: string): Promise<void> {
+    await this.db.send(new DeleteCommand({
+      TableName: this.table,
+      Key: { pk: `EMERG#${grantorId}#${itemId}`, sk: 'EMERG' },
+    }));
+  }
+
+  async listEmergencyAccessForGrantor(grantorId: string): Promise<EmergencyAccessItem[]> {
+    const res = await this.db.send(new QueryCommand({
+      TableName: this.table,
+      KeyConditionExpression: 'begins_with(pk, :pk)',
+      ExpressionAttributeValues: { ':pk': `EMERG#${grantorId}#` },
+    }));
+    return (res.Items as EmergencyAccessItem[] | undefined) ?? [];
+  }
+
+  async listEmergencyAccessForGrantee(granteeId: string): Promise<EmergencyAccessItem[]> {
+    const res = await this.db.send(new QueryCommand({
+      TableName: this.table,
+      IndexName: 'GSI1',
+      KeyConditionExpression: 'GSI1PK = :pk',
+      ExpressionAttributeValues: { ':pk': `EMERGGRANTEE#${granteeId}` },
+    }));
+    return (res.Items as EmergencyAccessItem[] | undefined) ?? [];
+  }
+
   async clearRememberedDevices(userId: string): Promise<void> {
     for (const device of await this.listDevices(userId)) {
       if (device.twoFactorRemembered) {
@@ -423,6 +501,11 @@ export class DynamoStore implements Store {
     await deleteRows(`CIPHER#${userId}#`, 'CIPHER');
     await deleteRows(`FOLDER#${userId}#`, 'FOLDER');
     await deleteRows(`SEND#${userId}#`, 'SEND');
+    // Trust relations die with either side (mirrors the emergency_access FK cascade).
+    for (const item of await this.listEmergencyAccessForGrantee(userId)) {
+      await this.deleteEmergencyAccess(item.grantorId, item.itemId);
+    }
+    await deleteRows(`EMERG#${userId}#`, 'EMERG');
     const memberships = await this.listOrganizationsForUser(userId);
     for (const m of memberships) await this.deleteOrgUser(m.orgId, userId);
   }
@@ -889,6 +972,7 @@ export class MemoryStore implements Store {
   private allCollections: CollectionItem[] = [];
   private allPolicies: PolicyItem[] = [];
   private allOrgLinks: OrgCollLink[] = [];
+  private allEmergency: EmergencyAccessItem[] = [];
 
   async getUserByEmail(email: string): Promise<UserItem | null> {
     return this.usersByEmail.get(email.toLowerCase()) ?? null;
@@ -958,6 +1042,34 @@ export class MemoryStore implements Store {
     this.allFolders = this.allFolders.filter((f) => !f.pk.startsWith(`FOLDER#${userId}#`));
     this.allSends = this.allSends.filter((s) => !s.pk.startsWith(`SEND#${userId}#`));
     this.allOrgUsers = this.allOrgUsers.filter((m) => m.userId !== userId);
+    this.allEmergency = this.allEmergency.filter((e) => e.grantorId !== userId && e.granteeId !== userId);
+  }
+
+  async putEmergencyAccess(item: EmergencyAccessItem): Promise<void> {
+    this.allEmergency = this.allEmergency.filter((e) => e.pk !== item.pk);
+    this.allEmergency.push({ ...item });
+  }
+
+  async getEmergencyAccess(grantorId: string, itemId: string): Promise<EmergencyAccessItem | null> {
+    const found = this.allEmergency.find((e) => e.pk === `EMERG#${grantorId}#${itemId}`);
+    return found ? { ...found } : null;
+  }
+
+  async getEmergencyAccessByToken(token: string): Promise<EmergencyAccessItem | null> {
+    const found = this.allEmergency.find((e) => e.GSI1PK === `EMERGTOKEN#${token}`);
+    return found ? { ...found } : null;
+  }
+
+  async deleteEmergencyAccess(grantorId: string, itemId: string): Promise<void> {
+    this.allEmergency = this.allEmergency.filter((e) => e.pk !== `EMERG#${grantorId}#${itemId}`);
+  }
+
+  async listEmergencyAccessForGrantor(grantorId: string): Promise<EmergencyAccessItem[]> {
+    return this.allEmergency.filter((e) => e.pk.startsWith(`EMERG#${grantorId}#`)).map((e) => ({ ...e }));
+  }
+
+  async listEmergencyAccessForGrantee(granteeId: string): Promise<EmergencyAccessItem[]> {
+    return this.allEmergency.filter((e) => e.GSI1PK === `EMERGGRANTEE#${granteeId}`).map((e) => ({ ...e }));
   }
 
   async putTwoFactorToken(item: TwoFactorItem): Promise<void> {

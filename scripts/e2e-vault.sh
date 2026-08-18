@@ -205,5 +205,33 @@ code=$(curl -s -o /tmp/e2e-body -w '%{http_code}' -X POST "$URL/api/two-factor/d
 [ "$code" = "200" ] || bad 15 "2FA disable returned $code: $(head -c 200 /tmp/e2e-body)"
 ok
 
+# 16. emergency access: invite w/ surfaced token → register grantee via token →
+#     confirm → initiate → approve → view sees the vault → takeover as grantor
+EA_ID="$(python3 -c "import uuid; print(uuid.uuid4())")"
+code=$(json POST /api/emergency-access/invite "{\"id\":\"$EA_ID\",\"email\":\"ea-grantee@example.com\",\"type\":1,\"waitTimeDays\":0}")
+[ "$code" = "200" ] || bad 16 "ea invite returned $code: $(head -c 200 /tmp/e2e-body)"
+EA_ID=$(json_field id)
+EA_TOKEN=$(json_field token)
+[ -n "$EA_ID" ] && [ -n "$EA_TOKEN" ] || bad 16 "ea invite token missing: $(head -c 300 /tmp/e2e-body)"
+code=$(curl -s -o /tmp/e2e-body -w '%{http_code}' -X POST "$URL/identity/accounts/register" -H 'Content-Type: application/x-www-form-urlencoded' --data "email=ea-grantee@example.com&masterPasswordHash=$PASSWORD_HASH&key=Z3JhbnRlZS1rZXk=&emergencyAccessId=$EA_ID&emergencyAccessToken=$EA_TOKEN")
+[ "$code" = "200" ] || bad 16 "ea register returned $code: $(head -c 200 /tmp/e2e-body)"
+EA_ACCESS=$(curl -s -X POST "$URL/identity/connect/token" -H 'Content-Type: application/x-www-form-urlencoded' --data "grant_type=password&username=ea-grantee@example.com&password=$PASSWORD_HASH&scope=api%20offline_access&deviceIdentifier=e2e-ea-grantee" | python3 -c "import json,sys; print(json.load(sys.stdin).get('access_token',''))")
+[ -n "$EA_ACCESS" ] || bad 16 "ea grantee login failed"
+[ "$(curl -s -o /tmp/e2e-body -w '%{http_code}' "$URL/api/emergency-access/granted" -H "Authorization: Bearer $EA_ACCESS")" = "200" ] || bad 16 "granted list failed"
+grep -q "\"id\":\"$EA_ID\"" /tmp/e2e-body || bad 16 "granted list missing item"
+code=$(json POST "/api/emergency-access/$EA_ID/confirm" '{"key":"ZW5jLWtleQ=="}')
+[ "$code" = "200" ] || bad 16 "confirm returned $code: $(head -c 200 /tmp/e2e-body)"
+code=$(curl -s -o /tmp/e2e-body -w '%{http_code}' -X POST "$URL/api/emergency-access/$EA_ID/initiate" -H 'Content-Type: application/json' -H "Authorization: Bearer $EA_ACCESS" --data '{}')
+[ "$code" = "200" ] || bad 16 "initiate returned $code: $(head -c 200 /tmp/e2e-body)"
+code=$(json POST "/api/emergency-access/$EA_ID/approve" '{}')
+[ "$code" = "200" ] || bad 16 "approve returned $code: $(head -c 200 /tmp/e2e-body)"
+code=$(curl -s -o /tmp/e2e-body -w '%{http_code}' -X POST "$URL/api/emergency-access/$EA_ID/view" -H 'Content-Type: application/json' -H "Authorization: Bearer $EA_ACCESS" --data '{}')
+[ "$code" = "200" ] || bad 16 "view returned $code: $(head -c 200 /tmp/e2e-body)"
+grep -q '"encryptedKey":"ZW5jLWtleQ=="' /tmp/e2e-body || bad 16 "view missing encryptedKey: $(head -c 300 /tmp/e2e-body)"
+code=$(curl -s -o /tmp/e2e-body -w '%{http_code}' -X POST "$URL/api/emergency-access/$EA_ID/takeover" -H 'Content-Type: application/json' -H "Authorization: Bearer $EA_ACCESS" --data '{}')
+[ "$code" = "200" ] || bad 16 "takeover returned $code: $(head -c 200 /tmp/e2e-body)"
+grep -q '"access_token"' /tmp/e2e-body || bad 16 "takeover returned no session: $(head -c 300 /tmp/e2e-body)"
+ok
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = "0" ]

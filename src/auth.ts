@@ -30,6 +30,7 @@ export async function issueSession(store: Store, user: UserItem, deviceId: strin
     type: 'access',
     stamp: user.securityStamp,
     expiresAt: now + ACCESS_TTL_SECONDS,
+    pairedAccess: null,
     pairedRefresh: refreshToken,
   };
   const refresh: SessionItem = {
@@ -41,6 +42,7 @@ export async function issueSession(store: Store, user: UserItem, deviceId: strin
     stamp: user.securityStamp,
     expiresAt: now + REFRESH_TTL_SECONDS,
     pairedAccess: accessToken,
+    pairedRefresh: null,
   };
   await store.putSession(access);
   await store.putSession(refresh);

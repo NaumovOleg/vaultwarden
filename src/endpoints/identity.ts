@@ -89,6 +89,21 @@ export async function register(params: Record<string, string>, ctx: RouteContext
     }
   }
 
+  // Emergency access invite binder (MISC-05): emergencyAccessToken +
+  // emergencyAccessId bind straight to the EA item once the account exists.
+  const eaToken = String(body.emergencyAccessToken ?? '').trim();
+  const eaId = String(body.emergencyAccessId ?? '').trim();
+  let invitedAccess: Awaited<ReturnType<typeof ctx.store.getEmergencyAccessByToken>> | null = null;
+  if (eaToken !== '' || eaId !== '') {
+    invitedAccess = await ctx.store.getEmergencyAccessByToken(eaToken);
+    if (!invitedAccess || invitedAccess.itemId !== eaId || invitedAccess.status !== 0) {
+      throw badRequest('Invalid or expired emergency access invitation.');
+    }
+    if (invitedAccess.email !== email) {
+      throw badRequest('Invitation is for a different email address.');
+    }
+  }
+
   const keys = (jsonValue(body, 'keys') ?? {}) as Record<string, unknown>;
   const salt = randomBytes(64);
   const kdf = normalizeKdf(auth.kdf, FALLBACK_KDF);
@@ -147,6 +162,21 @@ export async function register(params: Record<string, string>, ctx: RouteContext
     });
   }
 
+  // Bind the emergency access invite: status 0 → 1, grantee keys land here.
+  if (invitedAccess) {
+    await ctx.store.putEmergencyAccess({
+      ...invitedAccess,
+      granteeId: id,
+      name: typeof body.name === 'string' && body.name !== '' ? body.name : invitedAccess.name,
+      encryptedPrivateKey: typeof keys.privateKey === 'string' ? keys.privateKey : null,
+      publicKey: typeof keys.publicKey === 'string' ? keys.publicKey : null,
+      token: null,
+      GSI1PK: `EMERGGRANTEE#${id}`,
+      status: 1,
+      revisionDate: new Date().toISOString(),
+    });
+  }
+
   return json(200, {});
 }
 
@@ -200,7 +230,7 @@ function oauthError(status: number, error: string, description?: string) {
 const INVALID_GRANT = () => oauthError(400, 'invalid_grant', 'Username or password is incorrect.');
 const INVALID_GRANT_MIN = () => oauthError(400, 'invalid_grant');
 
-function authenticatedResponse(user: UserItem, pair: { accessToken: string; refreshToken: string; accessExpiresIn: number; refreshExpiresIn: number }, twoFactorToken?: string) {
+export function authenticatedResponse(user: UserItem, pair: { accessToken: string; refreshToken: string; accessExpiresIn: number; refreshExpiresIn: number }, twoFactorToken?: string) {
   return json(200, {
     access_token: pair.accessToken,
     expires_in: pair.accessExpiresIn,

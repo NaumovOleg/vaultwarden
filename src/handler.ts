@@ -95,6 +95,24 @@ import {
   sendEmailLogin,
   emailEnable,
 } from './endpoints/two-factor';
+import {
+  eaTrusted,
+  eaGranted,
+  eaGet,
+  eaPolicies,
+  eaInvite,
+  eaReinvite,
+  eaAccept,
+  eaConfirm,
+  eaUpdate,
+  eaDelete,
+  eaInitiate,
+  eaApprove,
+  eaReject,
+  eaView,
+  eaTakeover,
+  eaPassword,
+} from './endpoints/emergency-access';
 import { BitwardenError, internalError, notFound, toErrorBody } from './errors';
 import { match, Route, RouteContext } from './router';
 import { Store, MemoryStore } from './store';
@@ -258,6 +276,24 @@ const defaultRoutes: Route[] = [
   { method: 'POST', pattern: '/api/two-factor/send-email-login', handler: sendEmailLogin },
   { method: 'POST', pattern: '/api/two-factor/email', handler: emailEnable, auth: true },
   { method: 'PUT', pattern: '/api/two-factor/email', handler: emailEnable, auth: true },
+  { method: 'GET', pattern: '/api/emergency-access/trusted', handler: eaTrusted, auth: true },
+  { method: 'GET', pattern: '/api/emergency-access/granted', handler: eaGranted, auth: true },
+  { method: 'GET', pattern: '/api/emergency-access/:id', handler: eaGet, auth: true },
+  { method: 'GET', pattern: '/api/emergency-access/:id/policies', handler: eaPolicies, auth: true },
+  { method: 'POST', pattern: '/api/emergency-access/invite', handler: eaInvite, auth: true },
+  { method: 'POST', pattern: '/api/emergency-access/:id/reinvite', handler: eaReinvite, auth: true },
+  { method: 'POST', pattern: '/api/emergency-access/:id/accept', handler: eaAccept, auth: true },
+  { method: 'POST', pattern: '/api/emergency-access/:id/confirm', handler: eaConfirm, auth: true },
+  { method: 'PUT', pattern: '/api/emergency-access/:id', handler: eaUpdate, auth: true },
+  { method: 'POST', pattern: '/api/emergency-access/:id', handler: eaUpdate, auth: true },
+  { method: 'DELETE', pattern: '/api/emergency-access/:id', handler: eaDelete, auth: true },
+  { method: 'POST', pattern: '/api/emergency-access/:id/delete', handler: eaDelete, auth: true },
+  { method: 'POST', pattern: '/api/emergency-access/:id/initiate', handler: eaInitiate, auth: true },
+  { method: 'POST', pattern: '/api/emergency-access/:id/approve', handler: eaApprove, auth: true },
+  { method: 'POST', pattern: '/api/emergency-access/:id/reject', handler: eaReject, auth: true },
+  { method: 'POST', pattern: '/api/emergency-access/:id/view', handler: eaView, auth: true },
+  { method: 'POST', pattern: '/api/emergency-access/:id/takeover', handler: eaTakeover, auth: true },
+  { method: 'POST', pattern: '/api/emergency-access/:id/password', handler: eaPassword, auth: true },
 ];
 
 function json(statusCode: number, body: string): APIGatewayProxyResult {
