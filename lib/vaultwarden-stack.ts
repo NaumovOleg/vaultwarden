@@ -166,9 +166,9 @@ export class VaultwardenStack extends cdk.Stack {
 
     new cdk.aws_s3_deployment.BucketDeployment(this, 'WebvaultDeployment', {
       sources: [
-        // .map source files (52MB) are devtools-only and push the BucketDeployment
-        // custom-resource Lambda over its /tmp disk limit ("No space left on device").
-        cdk.aws_s3_deployment.Source.asset('static/webvault', { exclude: ['**/*.map'] }),
+        // Static pages only. The webvault bundle (~90MB, 120+ files) is uploaded
+        // manually with `aws s3 sync` — the BucketDeployment custom-resource
+        // Lambda times out at 15 min on that payload (see README).
         cdk.aws_s3_deployment.Source.asset('static', { exclude: ['webvault/**'] }),
       ],
       destinationBucket: this.staticBucket,
