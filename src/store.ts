@@ -419,7 +419,8 @@ export class DynamoStore implements Store {
     const res = await this.db.send(new QueryCommand({
       TableName: this.table,
       IndexName: 'GSI2',
-      KeyConditionExpression: 'owner = :owner AND begins_with(sk, :sk)',
+      KeyConditionExpression: '#owner = :owner AND begins_with(sk, :sk)',
+      ExpressionAttributeNames: { '#owner': 'owner' },
       ExpressionAttributeValues: { ':owner': grantorId, ':sk': 'EMERG' },
     }));
     return (res.Items as EmergencyAccessItem[] | undefined) ?? [];
@@ -626,7 +627,8 @@ export class DynamoStore implements Store {
     const res = await this.db.send(new QueryCommand({
       TableName: this.table,
       IndexName: 'GSI2',
-      KeyConditionExpression: 'owner = :owner AND begins_with(sk, :sk)',
+      KeyConditionExpression: '#owner = :owner AND begins_with(sk, :sk)',
+      ExpressionAttributeNames: { '#owner': 'owner' },
       ExpressionAttributeValues: { ':owner': userId, ':sk': 'CIPHER' },
     }));
     return (res.Items as CipherItem[] | undefined) ?? [];
@@ -789,7 +791,8 @@ export class DynamoStore implements Store {
     const res = await this.db.send(new QueryCommand({
       TableName: this.table,
       IndexName: 'GSI2',
-      KeyConditionExpression: 'owner = :owner AND begins_with(sk, :sk)',
+      KeyConditionExpression: '#owner = :owner AND begins_with(sk, :sk)',
+      ExpressionAttributeNames: { '#owner': 'owner' },
       ExpressionAttributeValues: { ':owner': userId, ':sk': 'SEND' },
     }));
     return (res.Items as SendItem[] | undefined) ?? [];
@@ -890,7 +893,8 @@ export class DynamoStore implements Store {
     const res = await this.db.send(new QueryCommand({
       TableName: this.table,
       IndexName: 'GSI2',
-      KeyConditionExpression: 'owner = :owner AND begins_with(sk, :sk)',
+      KeyConditionExpression: '#owner = :owner AND begins_with(sk, :sk)',
+      ExpressionAttributeNames: { '#owner': 'owner' },
       ExpressionAttributeValues: { ':owner': orgId, ':sk': 'ORGUSER' },
     }));
     return (res.Items as OrgUserItem[] | undefined) ?? [];
@@ -932,7 +936,8 @@ export class DynamoStore implements Store {
     const res = await this.db.send(new QueryCommand({
       TableName: this.table,
       IndexName: 'GSI2',
-      KeyConditionExpression: 'owner = :owner AND begins_with(sk, :sk)',
+      KeyConditionExpression: '#owner = :owner AND begins_with(sk, :sk)',
+      ExpressionAttributeNames: { '#owner': 'owner' },
       ExpressionAttributeValues: { ':owner': orgId, ':sk': 'POLICY' },
     }));
     return (res.Items as PolicyItem[] | undefined) ?? [];
@@ -957,7 +962,8 @@ export class DynamoStore implements Store {
     const res = await this.db.send(new QueryCommand({
       TableName: this.table,
       IndexName: 'GSI2',
-      KeyConditionExpression: 'owner = :owner AND begins_with(sk, :sk)',
+      KeyConditionExpression: '#owner = :owner AND begins_with(sk, :sk)',
+      ExpressionAttributeNames: { '#owner': 'owner' },
       ExpressionAttributeValues: { ':owner': orgId, ':sk': 'COLLECTION' },
     }));
     return (res.Items as CollectionItem[] | undefined) ?? [];
@@ -989,7 +995,8 @@ export class DynamoStore implements Store {
     const res = await this.db.send(new QueryCommand({
       TableName: this.table,
       IndexName: 'GSI2',
-      KeyConditionExpression: 'owner = :owner AND begins_with(sk, :sk)',
+      KeyConditionExpression: '#owner = :owner AND begins_with(sk, :sk)',
+      ExpressionAttributeNames: { '#owner': 'owner' },
       ExpressionAttributeValues: { ':owner': userId, ':sk': 'FOLDER' },
     }));
     return (res.Items as FolderItem[] | undefined) ?? [];
