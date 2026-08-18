@@ -1,10 +1,9 @@
 # STATE.md — Project Memory
 
 ## Current Position
-- **Phase:** 3 (Vault Core) — **code-complete** (plans 01-03: profile/keys/sync, cipher CRUD/trash, folders/import/account mgmt; 100 tests green). **Deploy + human web-vault check is OWNER-RUN** — see `.planning/phases/03-vault-core/03-SUMMARY.md` "Deferred / next".
-- **Next:** Phase 4 (Attachments & Sends) — plans 01-02 written at `.planning/phases/04-attachments-sends/`, execution in progress.
-- **Next:** Owner: `npm run webvault && npx cdk deploy --context vaultwarden:signupsAllowed=true`, `bash scripts/e2e-auth.sh https://vaultwarden.free-bert.online`, `bash scripts/e2e-vault.sh https://vaultwarden.free-bert.online`, redeploy signups=false, human web-vault personal-vault check. Then Phase 4 (attachments).
-- **Completed:** PROJECT.md, config, research (4 reports), FEATURES.md, REQUIREMENTS.md, ROADMAP.md, phase-1 (3 plans executed), phase-2 plans 01-03 (72 tests green), phase-3 plans 01-03 (100 tests green)
+- **Phase:** 5 (Organizations & Collections) — **code-complete** (plan 01: org+collection foundation; plan 02: members+policies+invite tokens; plan 03: sharing, org read model, accept page; 126 tests green). **Deploy + human web-vault check is OWNER-RUN** — see `.planning/phases/05-organizations/03-SUMMARY.md` "Owner handoff".
+- **Next:** Phase 6 (2FA — TOTP enrollment + verification, authenticator/duo/yubikey stubs, login two-step). Owner can also run the phase-5 deploy handoff now (org console two accounts, invite via accept.html, share cipher).
+- **Completed:** PROJECT.md, config, research (4 reports), FEATURES.md, REQUIREMENTS.md, ROADMAP.md, phase-1 (3 plans executed), phase-2 plans 01-03 (72 tests green), phase-3 plans 01-03 (100 tests green), phase-4 plans 01-02 (115 tests green), phase-5 plans 01-03 (126 tests green)
 
 ## Project Facts
 - Full custom Bitwarden-compatible server: Node 22 Lambda + DynamoDB + S3, CDK v2 rewrite
@@ -24,7 +23,7 @@
 ## Open Items
 - [ ] **Phase-1 live deploy** — owner runs: `npm run webvault && npx cdk deploy`, then curl smoke list (README "Verification") + browser check of the login page
 - [ ] Web vault artifact source decision (CI build vs pinned zip) — revisit later
-- [ ] Attachment 6MB→larger escape hatch (phase 4, documented not built)
+- [ ] Attachment 6MB→larger escape hatch (phase 4, documented not built — 4.5 MB direct ceiling, presigned-PUT is the upgrade)
 - [ ] Passwordless/passkey endpoint drift (v2, monitor)
 - [ ] Admin panel (out of scope)
 
@@ -36,5 +35,10 @@
 - Phase 3 plan 01 executed: commit (see log), 81 tests green (9 suites). accounts.ts profile/revision-date/keys/sync (+partial), UserItem avatarColor/masterKey*/revisionDate*/revisionDateMs, CipherItem/FolderItem types + list methods, RouteContext.query from rawQueryString.
 - Phase 3 plan 02 executed: commit (see log), 89 tests green (10 suites). ciphers.ts canonical serializer + full CRUD/trash/move/purge/bulk surface (24 routes), sync.ciphers filled, MemoryStore cipher/folder upsert fix, DDB begins_with query fix. Archive skipped (vaultwarden maps archive → soft delete).
 - Phase 3 plan 03 executed: commit (see log), 100 tests green (11 suites). folders.ts CRUD + orphan semantics (pinned vs VW source), POST /api/ciphers/import, account mgmt (password/kdf/security-stamp/verify-password/delete/profile), store.deleteUser, e2e-vault.sh + e2e:vault script. stack.test.ts CDK_OUTDIR pinned (was leaking ~170MB/run → 180GB ENOSPC). Deploy + web-vault check deferred to owner per standing policy.
+- Phase 4 plan 01 executed: 107 tests green (12 suites). src/objects.ts ObjectStore (S3 + Memory, presigned GET 5min, deletePrefix paginated), attachment v2/legacy/upload/get/delete + 401/404/413, cipherPurge + deleteAccount cascade S3 prefixes, bucket CORS + ATTACHMENTS_BUCKET env, byte-exact multipart via ctx.bodyBytes.
+- Phase 4 plan 02 executed: 115 tests green (12 suites). sends.ts CRUD + file/v2 + anonymous access + 302 download, SendItem + GSI1 SENDACCESS lookup, sync.sends, deleteAccount/deleteSend cascade send objects, e2e-vault.sh steps 12-13. AccessId = 10-hex handle; password client-hashed SHA-256 b64 stored as hash. Deploy + web-vault check deferred to owner per standing policy.
+- Phase 5 plan 01 executed: commit 8437101, 120 tests green (13 suites). Org/collection storage + endpoints, sync profile.organizations + collections; member id = pk suffix (user id once bound, invite uuid before).
+- Phase 5 plan 02 executed: commit 5351d4a, 124 tests green. members.ts (invite/reinvite/accept/roles/revoke-restore/bulk/public-keys, INVITE# GSI for tokens), policies.ts (ORG#{orgId}#POLICY#{type} + sync.policies), register orgInviteToken binding validated before user creation.
+- Phase 5 plan 03 executed: commits 3a86e03 + 023be83, 126 tests green. share/admin/collections(_v2)/organization-details endpoints, listCiphersForUser union read model, ORGCOLL link rows, org-delete cipher+attachment cascade, static accept.html + BucketDeployment static/ source, e2e-vault.sh step 14, README no-email invite section. Phase-5 deploy deferred to owner per standing policy.
 - Phase 1 deploy deferred by owner decision ("write the whole project, then I deploy"). Same policy applies to every later phase's deploy task.
 - Phase 2 planned (3 plans); key execution-time verification required: exact `authenticated_response`/`twofactor_auth` field shapes from vaultwarden main `src/api/identity.rs`, and `password_iterations` default from `src/config.rs`.
