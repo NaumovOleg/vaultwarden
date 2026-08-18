@@ -13,6 +13,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 export interface ObjectStore {
   putObject(key: string, bytes: Buffer): Promise<void>;
+  getObject(key: string): Promise<Buffer | null>;
   presignedGetUrl(key: string): Promise<string>;
   deleteObject(key: string): Promise<void>;
   deletePrefix(prefix: string): Promise<void>;
@@ -36,6 +37,19 @@ export class S3ObjectStore implements ObjectStore {
           ContentType: 'application/octet-stream',
         }),
       );
+    } finally {
+      client.destroy();
+    }
+  }
+
+  async getObject(key: string): Promise<Buffer | null> {
+    const client = new S3Client();
+    try {
+      const res = await client.send(new GetObjectCommand({ Bucket: this.bucket, Key: key }));
+      return Buffer.from(await res.Body!.transformToByteArray());
+    } catch (err) {
+      if ((err as { name?: string }).name === 'NoSuchKey') return null;
+      throw err;
     } finally {
       client.destroy();
     }
@@ -88,6 +102,10 @@ export class MemoryObjectStore implements ObjectStore {
 
   async putObject(key: string, bytes: Buffer): Promise<void> {
     this.objects.set(key, bytes);
+  }
+
+  async getObject(key: string): Promise<Buffer | null> {
+    return this.objects.get(key) ?? null;
   }
 
   async presignedGetUrl(key: string): Promise<string> {

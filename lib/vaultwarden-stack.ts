@@ -92,10 +92,12 @@ export class VaultwardenStack extends cdk.Stack {
         DEFAULT_DOMAIN: vaultOrigin,
         VAULT_TABLE: this.table.tableName,
         ATTACHMENTS_BUCKET: this.attachmentsBucket.bucketName,
+        ICONS_BUCKET: this.iconsBucket.bucketName,
       },
     });
     this.table.grantReadWriteData(this.handler);
     this.attachmentsBucket.grantReadWrite(this.handler);
+    this.iconsBucket.grantReadWrite(this.handler);
 
     this.api = new cdk.aws_apigatewayv2.HttpApi(this, 'Api', {
       // Catch-all: every request reaches the Lambda, the router decides.

@@ -82,6 +82,7 @@ import {
   memberAccept,
 } from './endpoints/members';
 import { policyList, policyGet, policyUpdate } from './endpoints/policies';
+import { iconHandler, defaultIconsObjects } from './endpoints/icons';
 import {
   twoFactorList,
   getAuthenticator,
@@ -105,6 +106,7 @@ const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' };
 export interface Deps {
   store: Store;
   objects?: ObjectStore;
+  icons?: ObjectStore;
 }
 
 function defaultObjects(): ObjectStore {
@@ -119,6 +121,7 @@ const defaultRoutes: Route[] = [
   { method: 'GET', pattern: '/alive', handler: alive },
   { method: 'GET', pattern: '/now', handler: now },
   { method: 'GET', pattern: '/api/version', handler: version },
+  { method: 'GET', pattern: '/icons/:host/icon.png', handler: iconHandler },
   { method: 'GET', pattern: '/api/config', handler: config },
   { method: 'POST', pattern: '/identity/accounts/register', handler: register },
   { method: 'POST', pattern: '/api/accounts/register', handler: register },
@@ -259,7 +262,7 @@ function json(statusCode: number, body: string): APIGatewayProxyResult {
 
 // One-shot body parsing: identity endpoints send form-urlencoded, the rest of
 // the API sends JSON. base64 decoding applies to whichever it is.
-function parseBody(event: APIGatewayProxyEventV2): Omit<RouteContext, 'store' | 'objects'> {
+function parseBody(event: APIGatewayProxyEventV2): Omit<RouteContext, 'store' | 'objects' | 'icons'> {
   const raw = event.body ?? '';
   const bytes = event.isBase64Encoded ? Buffer.from(raw, 'base64') : Buffer.from(raw, 'utf-8');
   const decoded = bytes.toString('utf-8');
@@ -306,7 +309,12 @@ export function createHandler(routes: Route[], deps: Deps = defaultDeps) {
       if (!route) {
         result = json(notFound().status, toErrorBody(notFound()));
       } else {
-        const ctx: RouteContext = { ...parseBody(event), store: deps.store, objects: deps.objects ?? defaultObjects() };
+        const ctx: RouteContext = {
+          ...parseBody(event),
+          store: deps.store,
+          objects: deps.objects ?? defaultObjects(),
+          icons: deps.icons ?? defaultIconsObjects(),
+        };
         if (route.auth) {
           const authn = await authenticate(deps.store, ctx);
           if (!authn) {

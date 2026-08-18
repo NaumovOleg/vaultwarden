@@ -11,6 +11,7 @@ export interface Route {
 export interface RouteContext {
   store: Store;
   objects: ObjectStore;
+  icons: ObjectStore;
   bodyRaw: string;
   bodyBytes: Buffer;
   bodyForm: URLSearchParams;
