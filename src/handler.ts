@@ -3,6 +3,18 @@ import { config, alive, now, version } from './endpoints/misc';
 import { register, prelogin, token, endsession } from './endpoints/identity';
 import { deviceList, deviceById, deviceRegisterToken, deviceClearToken } from './endpoints/devices';
 import { profile, revisionDate, keys, sync } from './endpoints/accounts';
+import {
+  cipherList,
+  cipherGet,
+  cipherCreate,
+  cipherUpdate,
+  cipherPartial,
+  cipherDelete,
+  cipherRestore,
+  cipherMove,
+  cipherPurge,
+  cipherBulkDelete,
+} from './endpoints/ciphers';
 import { BitwardenError, internalError, notFound, toErrorBody } from './errors';
 import { match, Route, RouteContext } from './router';
 import { Store, MemoryStore } from './store';
@@ -38,6 +50,27 @@ const defaultRoutes: Route[] = [
   { method: 'GET', pattern: '/api/accounts/revision-date', handler: revisionDate, auth: true },
   { method: 'POST', pattern: '/api/accounts/keys', handler: keys, auth: true },
   { method: 'GET', pattern: '/api/sync', handler: sync, auth: true },
+  { method: 'GET', pattern: '/api/ciphers', handler: cipherList, auth: true },
+  { method: 'GET', pattern: '/api/ciphers/:cipherId', handler: cipherGet, auth: true },
+  { method: 'GET', pattern: '/api/ciphers/:cipherId/details', handler: cipherGet, auth: true },
+  { method: 'POST', pattern: '/api/ciphers', handler: cipherCreate, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/create', handler: cipherCreate, auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/:cipherId', handler: cipherUpdate, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/:cipherId', handler: cipherUpdate, auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/:cipherId/partial', handler: cipherPartial, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/:cipherId/partial', handler: cipherPartial, auth: true },
+  { method: 'DELETE', pattern: '/api/ciphers/:cipherId', handler: cipherDelete, auth: true },
+  { method: 'DELETE', pattern: '/api/ciphers/:cipherId/delete', handler: cipherDelete, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/:cipherId/delete', handler: cipherDelete, auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/:cipherId/restore', handler: cipherRestore, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/:cipherId/restore', handler: cipherRestore, auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/:cipherId/move', handler: cipherMove, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/:cipherId/move', handler: cipherMove, auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/move', handler: cipherMove, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/move', handler: cipherMove, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/purge', handler: cipherPurge, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/delete', handler: cipherBulkDelete, auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/delete', handler: cipherBulkDelete, auth: true },
 ];
 
 function json(statusCode: number, body: string): APIGatewayProxyResult {

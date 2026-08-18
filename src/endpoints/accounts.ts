@@ -1,5 +1,6 @@
 import type { RouteContext } from '../router';
 import type { UserItem } from '../store';
+import { cipherJson } from './ciphers';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' };
 
@@ -129,47 +130,9 @@ export async function sync(params: Record<string, string>, ctx: RouteContext): P
     ...bundle,
     collections: [],
     policies: [],
-    ciphers: ciphers.map((c) => cipherDetailsJson(c)),
+    ciphers: ciphers.map((c) => cipherJson(c, 'cipherDetails')),
     domains: excludeDomains ? null : domainsJson(),
     sends: [],
     userDecryption: userDecryptionJson(user),
   });
 }
-
-import type { CipherItem } from '../store';
-
-function cipherDetailsJson(item: CipherItem) {
-  return {
-    object: 'cipherDetails',
-    id: item.id,
-    type: item.type,
-    creationDate: item.creationDate,
-    revisionDate: item.revisionDate,
-    deletedDate: item.deletedDate,
-    reprompt: item.reprompt,
-    organizationId: null,
-    key: null,
-    attachments: null,
-    organizationUseTotp: true,
-    collectionIds: [],
-    name: item.name,
-    notes: item.notes,
-    fields: item.fields,
-    passwordHistory: item.passwordHistory,
-    login: item.login,
-    secureNote: item.secureNote,
-    card: item.card,
-    identity: item.identity,
-    sshKey: item.sshKey,
-    bankAccount: null,
-    driversLicense: null,
-    passport: null,
-    edit: true,
-    viewPassword: true,
-    favorite: item.favorite,
-    folderId: item.folderId,
-    lastUsedDate: item.revisionDate,
-  };
-}
-
-export { cipherDetailsJson };

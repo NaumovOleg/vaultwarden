@@ -107,7 +107,6 @@ export interface CipherItem {
   passport: Record<string, unknown> | null;
   fields: { name: string | null; value: string | null; type: number; linkedId: number | null }[] | null;
   passwordHistory: unknown[] | null;
-  attachmentCount: number; // 0 (attachments = phase 4)
 }
 
 export interface FolderItem {
@@ -137,8 +136,14 @@ export interface Store {
   putRate(item: RateItem): Promise<void>;
   incrementRate(ip: string, ttlSeconds: number): Promise<void>;
   clearRate(ip: string): Promise<void>;
+  putCipher(cipher: CipherItem): Promise<void>;
+  getCipher(userId: string, cipherId: string): Promise<CipherItem | null>;
   listCiphers(userId: string): Promise<CipherItem[]>;
+  deleteCipher(userId: string, cipherId: string): Promise<void>;
+  putFolder(folder: FolderItem): Promise<void>;
+  getFolder(userId: string, folderId: string): Promise<FolderItem | null>;
   listFolders(userId: string): Promise<FolderItem[]>;
+  deleteFolder(userId: string, folderId: string): Promise<void>;
 }
 
 const TABLE = process.env.VAULT_TABLE ?? '';
@@ -292,16 +297,54 @@ export class DynamoStore implements Store {
   async listCiphers(userId: string): Promise<CipherItem[]> {
     const res = await this.db.send(new QueryCommand({
       TableName: this.table,
-      KeyConditionExpression: 'pk = :pk AND sk = :sk',
+      KeyConditionExpression: 'begins_with(pk, :pk) AND sk = :sk',
       ExpressionAttributeValues: { ':pk': `CIPHER#${userId}#`, ':sk': 'CIPHER' },
     }));
     return (res.Items as CipherItem[] | undefined) ?? [];
   }
 
+  async putCipher(cipher: CipherItem): Promise<void> {
+    await this.db.send(new PutCommand({ TableName: this.table, Item: cipher }));
+  }
+
+  async getCipher(userId: string, cipherId: string): Promise<CipherItem | null> {
+    const res = await this.db.send(new GetCommand({
+      TableName: this.table,
+      Key: { pk: `CIPHER#${userId}#${cipherId}`, sk: 'CIPHER' },
+    }));
+    return (res.Item as CipherItem | undefined) ?? null;
+  }
+
+  async deleteCipher(userId: string, cipherId: string): Promise<void> {
+    await this.db.send(new DeleteCommand({
+      TableName: this.table,
+      Key: { pk: `CIPHER#${userId}#${cipherId}`, sk: 'CIPHER' },
+    }));
+  }
+
+  async putFolder(folder: FolderItem): Promise<void> {
+    await this.db.send(new PutCommand({ TableName: this.table, Item: folder }));
+  }
+
+  async getFolder(userId: string, folderId: string): Promise<FolderItem | null> {
+    const res = await this.db.send(new GetCommand({
+      TableName: this.table,
+      Key: { pk: `FOLDER#${userId}#${folderId}`, sk: 'FOLDER' },
+    }));
+    return (res.Item as FolderItem | undefined) ?? null;
+  }
+
+  async deleteFolder(userId: string, folderId: string): Promise<void> {
+    await this.db.send(new DeleteCommand({
+      TableName: this.table,
+      Key: { pk: `FOLDER#${userId}#${folderId}`, sk: 'FOLDER' },
+    }));
+  }
+
   async listFolders(userId: string): Promise<FolderItem[]> {
     const res = await this.db.send(new QueryCommand({
       TableName: this.table,
-      KeyConditionExpression: 'pk = :pk AND sk = :sk',
+      KeyConditionExpression: 'begins_with(pk, :pk) AND sk = :sk',
       ExpressionAttributeValues: { ':pk': `FOLDER#${userId}#`, ':sk': 'FOLDER' },
     }));
     return (res.Items as FolderItem[] | undefined) ?? [];
@@ -404,11 +447,39 @@ export class MemoryStore implements Store {
 
   async listCiphers(userId: string): Promise<CipherItem[]> {
     return this.allCiphers
-      .filter((c) => c.pk === `CIPHER#${userId}#`)
+      .filter((c) => c.pk.startsWith(`CIPHER#${userId}#`))
       .map((c) => ({ ...c }));
   }
 
+  async putCipher(cipher: CipherItem): Promise<void> {
+    this.allCiphers = this.allCiphers.filter((c) => c.pk !== cipher.pk);
+    this.allCiphers.push({ ...cipher });
+  }
+
+  async getCipher(userId: string, cipherId: string): Promise<CipherItem | null> {
+    const found = this.allCiphers.find((c) => c.pk === `CIPHER#${userId}#${cipherId}`);
+    return found ? { ...found } : null;
+  }
+
+  async deleteCipher(userId: string, cipherId: string): Promise<void> {
+    this.allCiphers = this.allCiphers.filter((c) => c.pk !== `CIPHER#${userId}#${cipherId}`);
+  }
+
+  async putFolder(folder: FolderItem): Promise<void> {
+    this.allFolders = this.allFolders.filter((f) => f.pk !== folder.pk);
+    this.allFolders.push({ ...folder });
+  }
+
+  async getFolder(userId: string, folderId: string): Promise<FolderItem | null> {
+    const found = this.allFolders.find((f) => f.pk === `FOLDER#${userId}#${folderId}`);
+    return found ? { ...found } : null;
+  }
+
+  async deleteFolder(userId: string, folderId: string): Promise<void> {
+    this.allFolders = this.allFolders.filter((f) => f.pk !== `FOLDER#${userId}#${folderId}`);
+  }
+
   async listFolders(userId: string): Promise<FolderItem[]> {
-    return this.allFolders.filter((f) => f.pk === `FOLDER#${userId}#`).map((f) => ({ ...f }));
+    return this.allFolders.filter((f) => f.pk.startsWith(`FOLDER#${userId}#`)).map((f) => ({ ...f }));
   }
 }

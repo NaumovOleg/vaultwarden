@@ -42,7 +42,7 @@ describe('handler', () => {
   });
 
   it('unknown route on a known path shape is a 404 envelope, not a 500', async () => {
-    const r = await handler(event('POST', '/api/ciphers'));
+    const r = await handler(event('POST', '/api/settings'));
     expect(r.statusCode).toBe(404);
     expect(JSON.parse(r.body as string).Message).toBe('Not found.');
   });
