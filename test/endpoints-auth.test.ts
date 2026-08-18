@@ -195,13 +195,15 @@ describe('register + prelogin endpoints', () => {
       event('POST', '/identity/accounts/prelogin', JSON.stringify({ email: 'known@example.com' })),
     );
     expect(r.statusCode).toBe(200);
-    expect(JSON.parse(r.body as string)).toEqual({
+    const body = JSON.parse(r.body as string);
+    const user = await store.getUserByEmail('known@example.com');
+    expect(body).toEqual({
       kdf: 0,
       kdfIterations: 600_000,
       kdfMemory: null,
       kdfParallelism: null,
       kdfSettings: { kdfType: 0, iterations: 600_000, memory: null, parallelism: null },
-      salt: null,
+      salt: user!.salt,
     });
   });
 

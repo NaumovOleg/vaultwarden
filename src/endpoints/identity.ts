@@ -59,11 +59,36 @@ export function normalizeKdf(kdf: unknown, fallback: KdfConfig): KdfConfig {
 // POST /identity/accounts/register and POST /api/accounts/register (both paths).
 // POST /identity/accounts/register/send-verification-email — web vault shows
 // a "verify your email" step after every registration and fires this. No SMTP
-// here: accounts are created already verified (emailVerified: true), so the
-// right answer is an empty success — the client keeps the flow moving and a
-// real verification code can be wired up when mail sending lands.
-export async function sendVerificationEmail(): Promise<unknown> {
-  return json(200, {});
+// here, so mirror vaultwarden's no-mail path: return an opaque token directly,
+// the client whips through its finish-signup screen with it and calls
+// register/finish, where we burn the token and create the account.
+const VERIFY_TOKEN_TTL_SECONDS = 30 * 60;
+
+export async function sendVerificationEmail(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  if (process.env.SIGNUPS_ALLOWED !== 'true') {
+    throw new BitwardenError(403, 'Registration is disabled.');
+  }
+
+  const body = ctx.bodyJson as Record<string, unknown>;
+  const email = String(body.email ?? '').trim().toLowerCase();
+  if (!email.includes('@')) {
+    throw badRequest('Invalid email address.');
+  }
+  if (await ctx.store.getUserByEmail(email)) {
+    throw new BitwardenError(400, 'An account with this email already exists.');
+  }
+
+  const token = newToken();
+  await ctx.store.putVerifyToken({
+    pk: `VERIFY#${token}`,
+    sk: 'TOKEN',
+    email,
+    name: String(body.name ?? '').trim() || null,
+    expiresAt: Math.floor(Date.now() / 1000) + VERIFY_TOKEN_TTL_SECONDS,
+  });
+  // The client branches on the body being a string: string → finish-signup
+  // with the token, anything else → "check your email" screen (dead end, no SMTP).
+  return json(200, token);
 }
 
 export async function register(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
@@ -78,9 +103,31 @@ export async function register(params: Record<string, string>, ctx: RouteContext
   }
 
   const auth = (jsonValue(body, 'masterPasswordAuthentication') ?? {}) as Record<string, unknown>;
-  const clientHash = auth.hash ?? body.masterPasswordHash ?? ctx.bodyForm.get('masterPasswordHash');
+  // 2026 web vault serializes as { salt, kdf, masterPasswordAuthenticationHash };
+  // older clients send { hash, kdf }.
+  const clientHash =
+    auth.hash ??
+    auth.masterPasswordAuthenticationHash ??
+    body.masterPasswordHash ??
+    ctx.bodyForm.get('masterPasswordHash');
   if (typeof clientHash !== 'string' || clientHash === '') {
     throw badRequest('Master password hash is required.');
+  }
+
+  // register/finish path (new web vault flow): the verification token from
+  // send-verification-email is mandatory, single-use, and carries the name
+  // when the finish request doesn't (vaultwarden register_v2 behavior).
+  const verifyToken = String(body.emailVerificationToken ?? '').trim();
+  let verifiedName: string | null = null;
+  if (verifyToken !== '') {
+    const v = await ctx.store.getVerifyToken(verifyToken);
+    if (!v || v.expiresAt < Math.floor(Date.now() / 1000)) {
+      throw badRequest('Verification token is invalid or has expired.');
+    }
+    if (v.email !== email) {
+      throw badRequest('Email verification token does not match email.');
+    }
+    verifiedName = v.name;
   }
 
   if (await ctx.store.getUserByEmail(email)) {
@@ -114,8 +161,19 @@ export async function register(params: Record<string, string>, ctx: RouteContext
   }
 
   const keys = (jsonValue(body, 'keys') ?? {}) as Record<string, unknown>;
-  const salt = randomBytes(64);
+  // New clients derive the hash against a client-generated salt and send it
+  // along (old clients leave it to us, some send it at the JSON root).
+  const clientSaltRaw = typeof auth.salt === 'string' && auth.salt !== ''
+    ? auth.salt
+    : typeof body.salt === 'string' && body.salt !== ''
+      ? body.salt
+      : null;
+  const clientSalt = clientSaltRaw ? Buffer.from(clientSaltRaw, 'base64') : null;
+  const salt = clientSalt ?? randomBytes(64);
   const kdf = normalizeKdf(auth.kdf, FALLBACK_KDF);
+  const unlock = (jsonValue(body, 'masterPasswordUnlock') ?? {}) as Record<string, unknown>;
+  const unlockWrappedKey =
+    typeof unlock.masterKeyWrappedUserKey === 'string' ? unlock.masterKeyWrappedUserKey : null;
   const id = newUuid();
   const now = new Date();
   const user: UserItem = {
@@ -123,18 +181,23 @@ export async function register(params: Record<string, string>, ctx: RouteContext
     sk: 'PROFILE',
     id,
     email,
-    passwordHash: hashPassword(Buffer.from(clientHash, 'base64'), salt, 600000).toString('base64'),
-    salt: salt.toString('base64'),
-    passwordIterations: 600000,
+    passwordHash: hashPassword(Buffer.from(clientHash, 'base64'), salt, kdf.iterations).toString('base64'),
+    // Keep the client's salt verbatim: re-encoding it (toString('base64') of
+    // the decoded buffer) can drop trailing bits and return a DIFFERENT string
+    // than the client hashes against, breaking master-key derivation on login.
+    salt: clientSaltRaw ?? salt.toString('base64'),
+    passwordIterations: kdf.iterations,
     kdfType: kdf.type,
     kdfIterations: kdf.iterations,
     kdfMemory: kdf.memory,
     kdfParallelism: kdf.parallelism,
     securityStamp: newUuid(),
-    akey: String(body.key ?? ''),
+    // New clients skip the legacy `key` field; the wrapped user key (which
+    // they do send) doubles as the account key, like vaultwarden.
+    akey: String(body.key ?? '') || unlockWrappedKey || '',
     privateKey: typeof keys.privateKey === 'string' ? keys.privateKey : null,
     publicKey: typeof keys.publicKey === 'string' ? keys.publicKey : null,
-    name: String(body.name ?? ''),
+    name: verifiedName ?? String(body.name ?? ''),
     masterPasswordHint:
       typeof body.masterPasswordHint === 'string' && body.masterPasswordHint !== '' ? body.masterPasswordHint : null,
     enabled: true,
@@ -146,8 +209,13 @@ export async function register(params: Record<string, string>, ctx: RouteContext
     email2faAddress: null,
     domainsOverride: null,
     avatarColor: '#607D8B',
+    // New clients send the unlock envelope inside masterPasswordUnlock.
     masterKeyEncryptedUserKey:
-      typeof body.masterKeyEncryptedUserKey === 'string' ? body.masterKeyEncryptedUserKey : null,
+      typeof unlock.masterKeyEncryptedUserKey === 'string'
+        ? unlock.masterKeyEncryptedUserKey
+        : typeof body.masterKeyEncryptedUserKey === 'string'
+          ? body.masterKeyEncryptedUserKey
+          : unlockWrappedKey,
     masterKeyWrappedUserKey:
       typeof body.masterKeyWrappedUserKey === 'string' ? body.masterKeyWrappedUserKey : null,
     revisionDate: now.toISOString(),
@@ -186,6 +254,11 @@ export async function register(params: Record<string, string>, ctx: RouteContext
     });
   }
 
+  // Burn the single-use verification token only once the account exists.
+  if (verifyToken !== '') {
+    await ctx.store.deleteVerifyToken(verifyToken);
+  }
+
   return json(200, {});
 }
 
@@ -215,7 +288,9 @@ export async function prelogin(params: Record<string, string>, ctx: RouteContext
       memory: config.memory,
       parallelism: config.parallelism,
     },
-    salt: null,
+    // The 2026 clients derive masterPasswordAuthenticationHash from the salt
+    // returned here. Unknown email → null (don't leak account existence).
+    salt: user ? user.salt : null,
   });
 }
 
@@ -230,6 +305,28 @@ function paramsMap(ctx: RouteContext): Map<string, string> {
   return m;
 }
 
+// Client master-password hash from a password-grant request, wherever the
+// client put it: `password`/`MasterPasswordHash` form fields (classic), or
+// nested `masterPasswordAuthentication: {masterPasswordAuthenticationHash}`
+// as a JSON body or JSON string form field (2026 SDK clients).
+function extractClientHash(ctx: RouteContext, form: Map<string, string>): string {
+  const direct = form.get('password') ?? form.get('masterpasswordhash') ?? '';
+  if (direct) return direct;
+
+  let auth = (jsonValue(ctx.bodyJson, 'masterPasswordAuthentication') ?? {}) as Record<string, unknown>;
+  const authStr = form.get('masterpasswordauthentication');
+  if (typeof authStr === 'string' && authStr !== '') {
+    try {
+      const parsed = JSON.parse(authStr);
+      if (parsed && typeof parsed === 'object') auth = parsed as Record<string, unknown>;
+    } catch {
+      // not JSON — fall through to the JSON-body value
+    }
+  }
+  const fromAuth = auth.masterPasswordAuthenticationHash ?? auth.hash;
+  return typeof fromAuth === 'string' ? fromAuth : '';
+}
+
 function oauthError(status: number, error: string, description?: string) {
   const body: Record<string, string> = { error };
   if (description) body.error_description = description;
@@ -240,6 +337,31 @@ const INVALID_GRANT = () => oauthError(400, 'invalid_grant', 'Username or passwo
 const INVALID_GRANT_MIN = () => oauthError(400, 'invalid_grant');
 
 export function authenticatedResponse(user: UserItem, pair: { accessToken: string; refreshToken: string; accessExpiresIn: number; refreshExpiresIn: number }, twoFactorToken?: string) {
+  // MasterPasswordUnlock mirrors vaultwarden: the wrapped key doubles as the
+  // account key, and the Salt slot is deprecated/unused by the clients.
+  const masterPasswordUnlock = {
+    Kdf: {
+      KdfType: user.kdfType,
+      Iterations: user.kdfIterations,
+      Memory: user.kdfMemory,
+      Parallelism: user.kdfParallelism,
+    },
+    MasterKeyEncryptedUserKey: user.masterKeyEncryptedUserKey ?? user.akey,
+    MasterKeyWrappedUserKey: user.masterKeyWrappedUserKey ?? user.akey,
+    Salt: user.salt,
+  };
+  const accountKeys =
+    user.privateKey && user.publicKey
+      ? {
+          publicKeyEncryptionKeyPair: {
+            wrappedPrivateKey: user.privateKey,
+            publicKey: user.publicKey,
+            Object: 'publicKeyEncryptionKeyPair',
+          },
+          Object: 'privateKeys',
+        }
+      : null;
+
   return json(200, {
     access_token: pair.accessToken,
     expires_in: pair.accessExpiresIn,
@@ -253,6 +375,13 @@ export function authenticatedResponse(user: UserItem, pair: { accessToken: strin
     KdfParallelism: user.kdfParallelism,
     ResetMasterPassword: false,
     ForcePasswordReset: false,
+    MasterPasswordPolicy: null,
+    AccountKeys: accountKeys,
+    UserDecryptionOptions: {
+      HasMasterPassword: true,
+      MasterPasswordUnlock: masterPasswordUnlock,
+      Object: 'userDecryptionOptions',
+    },
     ApiKeyClientSecretHint: null,
     securityStamp: user.securityStamp,
     passwordlessLogin: false,
@@ -286,13 +415,16 @@ async function passwordGrant(ctx: RouteContext, form: Map<string, string>): Prom
     return oauthError(400, 'invalid_grant', 'Auth request not found.');
   }
   const username = form.get('username') ?? '';
-  const password = form.get('password') ?? form.get('masterpasswordhash');
-  if (!username || !password) return INVALID_GRANT();
+  // Classic clients put the client hash in `password` (or `MasterPasswordHash`).
+  // SDK clients (2026) send it nested as masterPasswordAuthentication
+  // (JSON body or JSON string field), like in register.
+  const clientHash = extractClientHash(ctx, form);
+  if (!username || !clientHash) return INVALID_GRANT();
 
   await rateLimit(ctx.store, ctx.sourceIp);
 
   const user = await ctx.store.getUserByEmail(username);
-  if (!user || !verifyClientHash(user, password)) {
+  if (!user || !verifyClientHash(user, clientHash)) {
     // Same response whether the email is unknown or the password is wrong.
     await recordFailedLogin(ctx.store, ctx.sourceIp);
     return INVALID_GRANT();

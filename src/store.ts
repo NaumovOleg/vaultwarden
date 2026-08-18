@@ -94,6 +94,14 @@ export interface TwoFactorItem {
   expiresAt: number;
 }
 
+export interface VerifyTokenItem {
+  pk: string; // VERIFY#{token}
+  sk: string; // TOKEN
+  email: string;
+  name: string | null;
+  expiresAt: number;
+}
+
 export interface RateItem {
   pk: string; // RATE#{ip}
   sk: string; // LOGIN
@@ -267,6 +275,9 @@ export interface Store {
   putTwoFactorToken(item: TwoFactorItem): Promise<void>;
   getTwoFactorToken(token: string): Promise<TwoFactorItem | null>;
   deleteTwoFactorToken(token: string): Promise<void>;
+  putVerifyToken(item: VerifyTokenItem): Promise<void>;
+  getVerifyToken(token: string): Promise<VerifyTokenItem | null>;
+  deleteVerifyToken(token: string): Promise<void>;
   putRecoveryHash(userId: string, hash: string): Promise<void>;
   listRecoveryHashes(userId: string): Promise<string[]>;
   deleteRecoveryHash(userId: string, hash: string): Promise<void>;
@@ -541,6 +552,25 @@ export class DynamoStore implements Store {
     await this.db.send(new DeleteCommand({
       TableName: this.table,
       Key: { pk: `TFA#${token}`, sk: 'TOKEN' },
+    }));
+  }
+
+  async putVerifyToken(item: VerifyTokenItem): Promise<void> {
+    await this.db.send(new PutCommand({ TableName: this.table, Item: item }));
+  }
+
+  async getVerifyToken(token: string): Promise<VerifyTokenItem | null> {
+    const res = await this.db.send(new GetCommand({
+      TableName: this.table,
+      Key: { pk: `VERIFY#${token}`, sk: 'TOKEN' },
+    }));
+    return (res.Item as VerifyTokenItem | undefined) ?? null;
+  }
+
+  async deleteVerifyToken(token: string): Promise<void> {
+    await this.db.send(new DeleteCommand({
+      TableName: this.table,
+      Key: { pk: `VERIFY#${token}`, sk: 'TOKEN' },
     }));
   }
 
@@ -1131,6 +1161,18 @@ export class MemoryStore implements Store {
 
   async deleteTwoFactorToken(token: string): Promise<void> {
     this.twoFactor.delete(`TFA#${token}`);
+  }
+
+  async putVerifyToken(item: VerifyTokenItem): Promise<void> {
+    this.twoFactor.set(item.pk, { ...item });
+  }
+
+  async getVerifyToken(token: string): Promise<VerifyTokenItem | null> {
+    return (this.twoFactor.get(`VERIFY#${token}`) as VerifyTokenItem | undefined) ?? null;
+  }
+
+  async deleteVerifyToken(token: string): Promise<void> {
+    this.twoFactor.delete(`VERIFY#${token}`);
   }
 
   async putRecoveryHash(userId: string, hash: string): Promise<void> {

@@ -87,11 +87,88 @@ describe('profile + sync bundle', () => {
     process.env.SIGNUPS_ALLOWED = oldSignups;
   });
 
-  it('send-verification-email answers 200 (no SMTP: accounts are born verified)', async () => {
+  it('send-verification-email returns a token; register/finish burns it', async () => {
     const env = makeEnv();
-    const r = await env.handler(ev('POST', '/identity/accounts/register/send-verification-email', JSON.stringify({ email: 'x@example.com' })));
+    const email = 'flow@example.com';
+    const send = await env.handler(
+      ev('POST', '/identity/accounts/register/send-verification-email', JSON.stringify({ email, name: 'Flow Tester' })),
+    );
+    expect(send.statusCode).toBe(200);
+    const token = JSON.parse(send.body as string);
+    expect(typeof token).toBe('string');
+    expect(token.length).toBeGreaterThan(0);
+
+    const finish = {
+      email,
+      emailVerificationToken: token,
+      masterPasswordHash: PASSWORD,
+      key: 'key-1',
+      keys: { publicKey: 'pub-1', privateKey: 'priv-1' },
+      masterPasswordHint: 'hint',
+    };
+    const mismatched = await env.handler(
+      ev('POST', '/identity/accounts/register', JSON.stringify({ ...finish, email: 'other@example.com' })),
+    );
+    expect(mismatched.statusCode).toBe(400);
+    expect(JSON.parse(mismatched.body as string).Message).toContain('does not match');
+
+    const r = await env.handler(ev('POST', '/identity/accounts/register', JSON.stringify(finish)));
     expect(r.statusCode).toBe(200);
-    expect(JSON.parse(r.body as string)).toEqual({});
+    expect((await env.store.getUserByEmail(email))!.name).toBe('Flow Tester');
+
+    const reuse = await env.handler(ev('POST', '/identity/accounts/register', JSON.stringify(finish)));
+    expect(reuse.statusCode).toBe(400);
+    expect(JSON.parse(reuse.body as string).Message).toContain('token');
+  });
+
+  it('register accepts the 2026 auth format (salt + masterPasswordAuthenticationHash) and logs in', async () => {
+    const env = makeEnv();
+    const email = 'v2-flow@example.com';
+    const salt = Buffer.from('client-generated-salt').toString('base64');
+    const auth = {
+      salt,
+      kdf: { type: 0, iterations: 600000, memory: null, parallelism: null },
+      masterPasswordAuthenticationHash: PASSWORD,
+    };
+    const r = await env.handler(
+      ev(
+        'POST',
+        '/identity/accounts/register',
+        JSON.stringify({
+          email,
+          masterPasswordAuthentication: auth,
+          masterPasswordUnlock: { salt, kdf: auth.kdf, masterKeyWrappedUserKey: 'wrapped-key' },
+          keys: { publicKey: 'pub-1', privateKey: 'priv-1' },
+        }),
+      ),
+    );
+    expect(r.statusCode).toBe(200);
+    const user = (await env.store.getUserByEmail(email))!;
+    expect(user.salt).toBe(salt);
+    expect(user.akey).toBe('wrapped-key');
+    expect(user.masterKeyEncryptedUserKey).toBe('wrapped-key');
+
+    const login = await env.handler(
+      ev(
+        'POST',
+        '/identity/connect/token',
+        new URLSearchParams({
+          grant_type: 'password',
+          username: email,
+          password: PASSWORD,
+          scope: 'api offline_access',
+          deviceIdentifier: 'dev-v2',
+          deviceType: '9',
+        }).toString(),
+      ),
+    );
+    expect(login.statusCode).toBe(200);
+    const body = JSON.parse(login.body as string);
+    expect(body.access_token).toBeTruthy();
+    expect(body.Key).toBe('wrapped-key');
+    expect(body.UserDecryptionOptions.HasMasterPassword).toBe(true);
+    expect(body.UserDecryptionOptions.MasterPasswordUnlock.MasterKeyWrappedUserKey).toBe('wrapped-key');
+    expect(body.AccountKeys.publicKeyEncryptionKeyPair.wrappedPrivateKey).toBe('priv-1');
   });
 
   it('duplicate email resolves to the newest account', async () => {
@@ -152,6 +229,13 @@ describe('profile + sync bundle', () => {
         object: 'privateKeys',
       },
       object: 'profile',
+      userDecryptionOptions: {
+        object: 'userDecryptionOptions',
+        hasMasterPassword: false,
+        masterPasswordUnlock: null,
+        keyConnectorOption: null,
+        trustedDeviceOption: null,
+      },
     });
   });
 
@@ -198,8 +282,12 @@ describe('profile + sync bundle', () => {
     const env = makeEnv();
     const at = await registerAndLogin(env, 'dec@example.com');
     const r = await env.handler(ev('GET', '/api/sync', '', at));
-    expect(JSON.parse(r.body as string).userDecryption).toEqual({
+    expect(JSON.parse(r.body as string).userDecryptionOptions).toEqual({
+      object: 'userDecryptionOptions',
+      hasMasterPassword: false,
       masterPasswordUnlock: null,
+      keyConnectorOption: null,
+      trustedDeviceOption: null,
     });
 
     // Register path captures masterKey fields; simulate that on a second user.
@@ -208,13 +296,17 @@ describe('profile + sync bundle', () => {
       masterKeyWrappedUserKey: 'wrapped-user-key',
     });
     const r2 = await env.handler(ev('GET', '/api/sync', '', at2));
-    expect(JSON.parse(r2.body as string).userDecryption).toEqual({
+    expect(JSON.parse(r2.body as string).userDecryptionOptions).toEqual({
+      object: 'userDecryptionOptions',
+      hasMasterPassword: true,
       masterPasswordUnlock: {
         kdf: { kdfType: 0, kdfIterations: 600_000, kdfMemory: null, kdfParallelism: null },
         masterKeyEncryptedUserKey: 'enc-user-key',
         masterKeyWrappedUserKey: 'wrapped-user-key',
         salt: 'dec2@example.com',
       },
+      keyConnectorOption: null,
+      trustedDeviceOption: null,
     });
   });
 

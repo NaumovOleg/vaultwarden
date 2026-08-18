@@ -6,6 +6,23 @@ import { createServer, IncomingMessage } from 'node:http';
 import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 import { createHandler, defaultRoutes } from './handler';
 import { DynamoStore, MemoryStore } from './store';
+import { createReadStream, existsSync, statSync } from 'node:fs';
+import { extname, join, resolve } from 'node:path';
+
+const WEBVAULT_ROOT = resolve(__dirname, '../static/webvault');
+const MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript',
+  '.map': 'application/json',
+  '.css': 'text/css',
+  '.wasm': 'application/wasm',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+};
 
 export const PORT = Number(process.env.PORT ?? 3000);
 
@@ -37,21 +54,74 @@ export function toEvent(req: IncomingMessage, body: Buffer): APIGatewayProxyEven
 export function startServer(listenPort = PORT) {
   const store = process.env.VAULT_TABLE ? new DynamoStore(process.env.VAULT_TABLE) : new MemoryStore();
   const api = createHandler(defaultRoutes, { store });
-  const server = createServer((req, res) => {
+
+  // Serves static/webvault files (same-origin) so the real web vault can be
+  // driven against the API without CORS or environment settings.
+  function serveStatic(url: URL, res: any): boolean {
+    const p = url.pathname === '/' ? '/index.html' : url.pathname;
+    const file = join(WEBVAULT_ROOT, p);
+    if (!file.startsWith(WEBVAULT_ROOT) || !existsSync(file) || !statSync(file).isFile()) return false;
+    res.writeHead(200, { 'Content-Type': MIME[extname(file)] ?? 'application/octet-stream' });
+    createReadStream(file).pipe(res);
+    return true;
+  }
+  function handle(req: IncomingMessage, res: any) {
     const chunks: Buffer[] = [];
     req.on('data', (c: Buffer) => chunks.push(c));
     req.on('end', async () => {
       try {
+        const url = new URL(req.url ?? '/', 'http://localhost');
+        if (!url.pathname.startsWith('/api/') && !url.pathname.startsWith('/identity/') && req.method === 'GET' && serveStatic(url, res)) {
+          return;
+        }
+        // Dev-only CORS: the web vault may run on a separate dev origin.
+        if (req.method === 'OPTIONS') {
+          res.writeHead(204, {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
+            'Access-Control-Allow-Headers': '*',
+          });
+          res.end();
+          return;
+        }
         const result = await api(toEvent(req, Buffer.concat(chunks)));
-        res.writeHead(result.statusCode, result.headers as Record<string, string | number | undefined>);
+        res.writeHead(result.statusCode, {
+          ...(result.headers as Record<string, string | number | undefined>),
+          'Access-Control-Allow-Origin': '*',
+        });
         res.end(result.body ?? '');
       } catch (err) {
         console.error('unhandled error', err);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.writeHead(500, {
+          'Content-Type': 'application/json',
+          'Access-Control-Allow-Origin': '*',
+        });
         res.end('{"Message":"Internal server error"}');
       }
     });
-  });
+  }
+
+  // The web vault refuses to talk to non-HTTPS servers; HTTPS_PORT + certs
+  // enable a local TLS front for real-client testing (dev only).
+  if (process.env.HTTPS_PORT) {
+    const https = require('node:https') as typeof import('node:https');
+    const { readFileSync } = require('node:fs') as typeof import('node:fs');
+    const server = https.createServer(
+      {
+        key: readFileSync(process.env.SSL_KEY!),
+        cert: readFileSync(process.env.SSL_CERT!),
+      },
+      handle,
+    );
+    return new Promise<{ server: ReturnType<typeof createServer>; port: number; url: string; close: () => Promise<void> }>(
+      (resolve) => {
+        const port = Number(process.env.HTTPS_PORT);
+        server.listen(port, () => resolve({ server, port, url: `https://localhost:${port}`, close: () => new Promise((done) => server.close(() => done())) }));
+      },
+    );
+  }
+
+  const server = createServer(handle);
   return new Promise<{ server: ReturnType<typeof createServer>; port: number; url: string; close: () => Promise<void> }>(
     (resolve) => {
       server.listen(listenPort, () => {

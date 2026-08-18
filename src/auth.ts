@@ -1,4 +1,4 @@
-import { newToken, verifyPassword as ctVerify } from './crypto';
+import { signJwt, verifyPassword as ctVerify } from './crypto';
 import { BitwardenError } from './errors';
 import type { RouteContext } from './router';
 import type { SessionItem, Store, UserItem } from './store';
@@ -20,8 +20,8 @@ export interface SessionPair {
 // for rotating (deleting) any previous pair of the same device.
 export async function issueSession(store: Store, user: UserItem, deviceId: string): Promise<SessionPair> {
   const now = Math.floor(Date.now() / 1000);
-  const accessToken = newToken();
-  const refreshToken = newToken();
+  const accessToken = signJwt({ sub: user.id }, ACCESS_TTL_SECONDS);
+  const refreshToken = signJwt({ sub: user.id }, REFRESH_TTL_SECONDS);
   const access: SessionItem = {
     pk: `SESS#${accessToken}`,
     sk: 'TOKEN',

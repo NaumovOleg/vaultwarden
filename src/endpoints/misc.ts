@@ -60,8 +60,10 @@ export function hibpBreach(): APIGatewayProxyResult {
   return { statusCode: 404, headers: JSON_HEADERS, body: '' };
 }
 
+export const BUILD_TAG = '2026-08-18-auth-fix';
+
 export function alive(): APIGatewayProxyResult {
-  return { statusCode: 200, body: '' };
+  return { statusCode: 200, body: BUILD_TAG };
 }
 
 export function now(): APIGatewayProxyResult {

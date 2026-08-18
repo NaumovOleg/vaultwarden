@@ -11,6 +11,21 @@ export function newToken(): string {
   return crypto.randomBytes(32).toString('base64url');
 }
 
+// HS256 JWT for access/refresh tokens: the 2026 clients' SDK decodes the
+// access token payload (sub = userId). The server never verifies the
+// signature — sessions are looked up by the raw token string in the store —
+// but the token must look like a real JWT.
+export function signJwt(claims: Record<string, unknown>, ttlSeconds: number): string {
+  const now = Math.floor(Date.now() / 1000);
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const payload = Buffer.from(
+    JSON.stringify({ ...claims, jti: newToken(), iat: now, nbf: now, exp: now + ttlSeconds }),
+  ).toString('base64url');
+  const secret = process.env.JWT_SECRET ?? 'vaultwarden-cdk-dev-secret';
+  const sig = crypto.createHmac('sha256', secret).update(`${header}.${payload}`).digest('base64url');
+  return `${header}.${payload}.${sig}`;
+}
+
 export function newUuid(): string {
   return crypto.randomUUID();
 }

@@ -1,11 +1,11 @@
-import { alive, config, now, version } from '../src/endpoints/misc';
+import { BUILD_TAG, alive, config, now, version } from '../src/endpoints/misc';
 import { BitwardenError, internalError, notFound, toErrorBody } from '../src/errors';
 
 describe('misc endpoints', () => {
-  it('alive returns 200 with empty body', () => {
+  it('alive returns 200 with the build tag', () => {
     const r = alive();
     expect(r.statusCode).toBe(200);
-    expect(r.body).toBe('');
+    expect(r.body).toBe(BUILD_TAG);
   });
 
   it('now returns an ISO-8601 UTC timestamp', () => {

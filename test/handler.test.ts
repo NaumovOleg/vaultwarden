@@ -1,5 +1,6 @@
 import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 import { createHandler, handler } from '../src/handler';
+import { BUILD_TAG } from '../src/endpoints/misc';
 import { BitwardenError } from '../src/errors';
 
 function event(method: string, rawPath: string): APIGatewayProxyEventV2 {
@@ -13,10 +14,10 @@ function event(method: string, rawPath: string): APIGatewayProxyEventV2 {
 }
 
 describe('handler', () => {
-  it('responds 200 empty to GET /alive', async () => {
+  it('responds 200 with the build tag to GET /alive', async () => {
     const r = await handler(event('GET', '/alive'));
     expect(r.statusCode).toBe(200);
-    expect(r.body).toBe('');
+    expect(r.body).toBe(BUILD_TAG);
   });
 
   it('responds 200 to GET /now and GET /api/version', async () => {

@@ -1,4 +1,5 @@
 import type { APIGatewayProxyEventV2 } from 'aws-lambda';
+import { pbkdf2Sync } from 'node:crypto';
 import { totpCode } from '../src/crypto';
 import { createHandler } from '../src/handler';
 import type { Route } from '../src/router';
@@ -6,11 +7,12 @@ import { MemoryStore } from '../src/store';
 
 const routes: Route[] = [
   { method: 'POST', pattern: '/identity/accounts/register', handler: (p, ctx) => register(p, ctx) },
+  { method: 'POST', pattern: '/identity/accounts/prelogin', handler: (p, ctx) => prelogin(p, ctx) },
   { method: 'POST', pattern: '/identity/connect/token', handler: (p, ctx) => token(p, ctx) },
   { method: 'POST', pattern: '/identity/connect/endsession', handler: (p, ctx) => endsession(p, ctx) },
 ];
 
-import { register, token, endsession } from '../src/endpoints/identity';
+import { register, prelogin, token, endsession } from '../src/endpoints/identity';
 
 function makeHandler() {
   const store = new MemoryStore();
@@ -72,6 +74,12 @@ describe('connect/token protocol', () => {
     const r = await handler(loginBody('happy@example.com'));
     expect(r.statusCode).toBe(200);
     const body = JSON.parse(r.body as string);
+    // The 2026 SDK decodes the access token as a JWT (3 parts, sub = userId).
+    expect(body.access_token.split('.')).toHaveLength(3);
+    const payload = JSON.parse(
+      Buffer.from(body.access_token.split('.')[1], 'base64url').toString('utf8'),
+    );
+    expect(payload.sub).toEqual(expect.any(String));
     expect(body).toEqual({
       access_token: expect.any(String),
       expires_in: 3600,
@@ -85,6 +93,25 @@ describe('connect/token protocol', () => {
       KdfParallelism: null,
       ResetMasterPassword: false,
       ForcePasswordReset: false,
+      MasterPasswordPolicy: null,
+      AccountKeys: {
+        publicKeyEncryptionKeyPair: {
+          wrappedPrivateKey: 'priv',
+          publicKey: 'pub',
+          Object: 'publicKeyEncryptionKeyPair',
+        },
+        Object: 'privateKeys',
+      },
+      UserDecryptionOptions: {
+        HasMasterPassword: true,
+        MasterPasswordUnlock: {
+          Kdf: { KdfType: 0, Iterations: 600_000, Memory: null, Parallelism: null },
+          MasterKeyEncryptedUserKey: 'akey-value',
+          MasterKeyWrappedUserKey: 'akey-value',
+          Salt: expect.any(String),
+        },
+        Object: 'userDecryptionOptions',
+      },
       ApiKeyClientSecretHint: null,
       securityStamp: expect.any(String),
       passwordlessLogin: false,
@@ -259,6 +286,105 @@ describe('connect/token protocol', () => {
     expect(JSON.parse(blocked.body as string).Message).toBe(
       'Too many login attempts. Try again later.',
     );
+  });
+
+  it('2026 flow: register with client salt → prelogin returns it → login with derived hash', async () => {
+    const { handler } = makeHandler();
+    const iter = 4096;
+    const salt = 'dGhlLWNsaWVudC1zYWx0MjAyNg=='; // base64("the-client-salt2026")
+    const clientHash = pbkdf2Sync('master-password', Buffer.from(salt, 'base64'), iter, 32, 'sha256').toString('base64');
+
+    const reg = await handler({
+      rawPath: '/identity/accounts/register',
+      body: JSON.stringify({
+        email: 'realistic@example.com',
+        masterPasswordAuthentication: {
+          salt,
+          kdf: { kdfType: 0, kdfIterations: iter },
+          masterPasswordAuthenticationHash: clientHash,
+        },
+        masterPasswordUnlock: { masterKeyWrappedUserKey: 'wrapped-user-key' },
+      }),
+      headers: { 'content-type': 'application/json' },
+      requestContext: { http: { method: 'POST' }, requestId: 'tr' },
+    } as unknown as APIGatewayProxyEventV2);
+    expect(reg.statusCode).toBe(200);
+
+    const pre = await handler({
+      rawPath: '/identity/accounts/prelogin',
+      body: JSON.stringify({ email: 'realistic@example.com' }),
+      headers: { 'content-type': 'application/json' },
+      requestContext: { http: { method: 'POST' }, requestId: 'tr' },
+    } as unknown as APIGatewayProxyEventV2);
+    expect(JSON.parse(pre.body as string).salt).toBe(salt);
+
+    const login = await handler(loginBody('realistic@example.com', { password: clientHash }));
+    expect(login.statusCode).toBe(200);
+    expect(JSON.parse(login.body as string).access_token).toBeDefined();
+  });
+
+  it('2026 flow: non-canonical client salt is stored verbatim (re-encoding truncated it, breaking unlock)', async () => {
+    const { handler } = makeHandler();
+    const iter = 4096;
+    // 25 chars — not a multiple of 4. base64-decoding it yields 18 bytes and
+    // re-encoding drops the trailing 'e', so the old code stored
+    // "postdeployfree+bertonlin" and the client's wrapped keys no longer
+    // unwrap against the salt prelogin returned.
+    const salt = 'postdeployfree+bertonline';
+    const clientHash = pbkdf2Sync('master-password', Buffer.from(salt, 'base64'), iter, 32, 'sha256').toString('base64');
+
+    const reg = await handler({
+      rawPath: '/identity/accounts/register',
+      body: JSON.stringify({
+        email: 'odd-salt@example.com',
+        masterPasswordAuthentication: {
+          salt,
+          kdf: { kdfType: 0, kdfIterations: iter },
+          masterPasswordAuthenticationHash: clientHash,
+        },
+        masterPasswordUnlock: { masterKeyWrappedUserKey: 'wrapped-user-key' },
+      }),
+      headers: { 'content-type': 'application/json' },
+      requestContext: { http: { method: 'POST' }, requestId: 'tr' },
+    } as unknown as APIGatewayProxyEventV2);
+    expect(reg.statusCode).toBe(200);
+
+    const pre = await handler({
+      rawPath: '/identity/accounts/prelogin',
+      body: JSON.stringify({ email: 'odd-salt@example.com' }),
+      headers: { 'content-type': 'application/json' },
+      requestContext: { http: { method: 'POST' }, requestId: 'tr' },
+    } as unknown as APIGatewayProxyEventV2);
+    const preBody = JSON.parse(pre.body as string);
+    expect(preBody.salt).toBe(salt);
+
+    const login = await handler(loginBody('odd-salt@example.com', { password: clientHash }));
+    expect(login.statusCode).toBe(200);
+    const tokenBody = JSON.parse(login.body as string);
+    expect(tokenBody.UserDecryptionOptions.MasterPasswordUnlock.Salt).toBe(salt);
+  });
+
+  it('2026 SDK style: JSON body with nested masterPasswordAuthentication', async () => {
+    const { handler } = makeHandler();
+    await registerUser(handler, 'sdk@example.com');
+    const r = await handler({
+      rawPath: '/identity/connect/token',
+      body: JSON.stringify({
+        grant_type: 'password',
+        username: 'sdk@example.com',
+        scope: 'api offline_access',
+        client_id: 'sdk',
+        masterPasswordAuthentication: {
+          salt: null,
+          kdf: { kdfType: 0, kdfIterations: 600_000 },
+          masterPasswordAuthenticationHash: PASSWORD,
+        },
+      }),
+      headers: { 'content-type': 'application/json' },
+      requestContext: { http: { method: 'POST' }, requestId: 'tr' },
+    } as unknown as APIGatewayProxyEventV2);
+    expect(r.statusCode).toBe(200);
+    expect(JSON.parse(r.body as string).access_token).toBeDefined();
   });
 
   it('password field wins over masterPasswordHash; legacy MasterPasswordHash works', async () => {

@@ -82,6 +82,7 @@ function profileJson(user: UserItem, orgs: Record<string, unknown>[] = []) {
       object: 'privateKeys',
     },
     object: 'profile',
+    userDecryptionOptions: userDecryptionJson(user),
   };
 }
 
@@ -92,21 +93,26 @@ function domainsJson() {
 }
 
 function userDecryptionJson(user: UserItem) {
+  const masterPasswordUnlock =
+    user.masterKeyEncryptedUserKey || user.masterKeyWrappedUserKey
+      ? {
+          kdf: {
+            kdfType: user.kdfType,
+            kdfIterations: user.kdfIterations,
+            kdfMemory: user.kdfMemory,
+            kdfParallelism: user.kdfParallelism,
+          },
+          masterKeyEncryptedUserKey: user.masterKeyEncryptedUserKey,
+          masterKeyWrappedUserKey: user.masterKeyWrappedUserKey,
+          salt: user.email,
+        }
+      : null;
   return {
-    masterPasswordUnlock:
-      user.masterKeyEncryptedUserKey || user.masterKeyWrappedUserKey
-        ? {
-            kdf: {
-              kdfType: user.kdfType,
-              kdfIterations: user.kdfIterations,
-              kdfMemory: user.kdfMemory,
-              kdfParallelism: user.kdfParallelism,
-            },
-            masterKeyEncryptedUserKey: user.masterKeyEncryptedUserKey,
-            masterKeyWrappedUserKey: user.masterKeyWrappedUserKey,
-            salt: user.email,
-          }
-        : null,
+    object: 'userDecryptionOptions',
+    hasMasterPassword: masterPasswordUnlock !== null,
+    masterPasswordUnlock,
+    keyConnectorOption: null,
+    trustedDeviceOption: null,
   };
 }
 
@@ -168,7 +174,7 @@ export async function sync(params: Record<string, string>, ctx: RouteContext): P
     ciphers: await Promise.all(ciphers.map((c) => cipherJson(c, 'cipherDetails', ctx.objects))),
     domains: excludeDomains ? null : domainsJson(),
     sends: sends.map(sendJson),
-    userDecryption: userDecryptionJson(user),
+    userDecryptionOptions: userDecryptionJson(user),
   });
 }
 

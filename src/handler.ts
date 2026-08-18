@@ -153,6 +153,8 @@ export const defaultRoutes: Route[] = [
   { method: 'GET', pattern: '/icons/:host/icon.png', handler: iconHandler },
   { method: 'GET', pattern: '/api/config', handler: config },
   { method: 'POST', pattern: '/identity/accounts/register/send-verification-email', handler: sendVerificationEmail },
+  { method: 'POST', pattern: '/identity/accounts/register/finish', handler: register },
+  { method: 'POST', pattern: '/api/accounts/register/finish', handler: register },
   { method: 'POST', pattern: '/identity/accounts/register', handler: register },
   { method: 'POST', pattern: '/api/accounts/register', handler: register },
   { method: 'POST', pattern: '/identity/accounts/prelogin', handler: prelogin },
