@@ -24,7 +24,7 @@ describe('VaultwardenStack', () => {
     expect(() => synth()).not.toThrow();
   });
 
-  it('creates a DynamoDB table with on-demand billing and PITR', () => {
+  it('creates a DynamoDB table with on-demand billing, PITR and the GSI1 email index', () => {
     const t = synth();
     t.hasResourceProperties('AWS::DynamoDB::Table', {
       BillingMode: 'PAY_PER_REQUEST',
@@ -32,10 +32,22 @@ describe('VaultwardenStack', () => {
       AttributeDefinitions: Match.arrayWith([
         { AttributeName: 'pk', AttributeType: 'S' },
         { AttributeName: 'sk', AttributeType: 'S' },
+        { AttributeName: 'GSI1PK', AttributeType: 'S' },
+        { AttributeName: 'GSI1SK', AttributeType: 'S' },
       ]),
       KeySchema: Match.arrayWith([
         { AttributeName: 'pk', KeyType: 'HASH' },
         { AttributeName: 'sk', KeyType: 'RANGE' },
+      ]),
+      GlobalSecondaryIndexes: Match.arrayWith([
+        {
+          IndexName: 'GSI1',
+          KeySchema: [
+            { AttributeName: 'GSI1PK', KeyType: 'HASH' },
+            { AttributeName: 'GSI1SK', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'ALL' },
+        },
       ]),
     });
   });
@@ -53,22 +65,27 @@ describe('VaultwardenStack', () => {
     const fn = handlerFunction(t);
     expect(fn.Properties.MemorySize).toBe(512);
     expect(fn.Properties.Timeout).toBe(30);
-    expect(fn.Properties.Environment.Variables).toEqual({
-      VERSION: '2.0.0',
-      SIGNUPS_ALLOWED: 'true',
-      DEFAULT_DOMAIN: 'vault.example.com',
-    });
+    expect(fn.Properties.Environment.Variables).toEqual(
+      expect.objectContaining({
+        VERSION: '2.0.0',
+        SIGNUPS_ALLOWED: 'true',
+        DEFAULT_DOMAIN: 'vault.example.com',
+      }),
+    );
+    expect(fn.Properties.Environment.Variables.VAULT_TABLE).toBeDefined();
   });
 
-  it('grants the lambda read access to the table', () => {
+  it('grants the lambda read/write access to the table', () => {
     const t = synth();
     const fn = handlerFunction(t);
     expect(fn.Properties.Role).toBeDefined();
     const policies = Object.values(t.findResources('AWS::IAM::Policy')) as any[];
-    const hasDescribeTable = policies.some((p) =>
-      JSON.stringify(p.Properties.PolicyDocument.Statement).includes('dynamodb:DescribeTable'),
-    );
-    expect(hasDescribeTable).toBe(true);
+    const statements = policies
+      .map((p) => JSON.stringify(p.Properties.PolicyDocument.Statement))
+      .join('\n');
+    expect(statements).toContain('dynamodb:DescribeTable');
+    expect(statements).toContain('dynamodb:PutItem');
+    expect(statements).toContain('dynamodb:Query');
   });
 
   it('creates an HTTP API with a catch-all route to the lambda', () => {

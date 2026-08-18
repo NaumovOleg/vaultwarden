@@ -42,6 +42,12 @@ export class VaultwardenStack extends cdk.Stack {
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
+    // GSI1: email → PROFILE lookup for prelogin/login (ARCHITECTURE §3.1)
+    this.table.addGlobalSecondaryIndex({
+      indexName: 'GSI1',
+      partitionKey: { name: 'GSI1PK', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'GSI1SK', type: dynamodb.AttributeType.STRING },
+    });
 
     // Regenerable caches, not data — safe to destroy with the stack.
     this.attachmentsBucket = new s3.Bucket(this, 'AttachmentsBucket', {
@@ -74,9 +80,10 @@ export class VaultwardenStack extends cdk.Stack {
         VERSION: version,
         SIGNUPS_ALLOWED: signupsAllowed,
         DEFAULT_DOMAIN: new URL(domain).hostname,
+        VAULT_TABLE: this.table.tableName,
       },
     });
-    this.table.grantReadData(this.handler);
+    this.table.grantReadWriteData(this.handler);
 
     this.api = new cdk.aws_apigatewayv2.HttpApi(this, 'Api', {
       // Catch-all: every request reaches the Lambda, the router decides.

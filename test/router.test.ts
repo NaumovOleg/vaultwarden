@@ -1,5 +1,7 @@
 import { match, Route } from '../src/router';
 
+const ctx = {} as any;
+
 const routes: Route[] = [
   { method: 'GET', pattern: '/api/config', handler: () => 'config' },
   { method: 'GET', pattern: '/api/ciphers/:id', handler: (p) => p },
@@ -11,7 +13,7 @@ describe('match', () => {
   it('matches an exact path', () => {
     const m = match('GET', '/api/config', routes);
     expect(m).not.toBeNull();
-    expect(m!.handler({})).toBe('config');
+    expect(m!.handler({}, ctx)).toBe('config');
     expect(m!.params).toEqual({});
   });
 
@@ -24,7 +26,7 @@ describe('match', () => {
       { method: 'GET', pattern: '/api/ciphers/:id', handler: () => 'param' },
       { method: 'GET', pattern: '/api/ciphers/special', handler: () => 'exact' },
     ];
-    expect(match('GET', '/api/ciphers/special', mixed)!.handler({})).toBe('exact');
+    expect(match('GET', '/api/ciphers/special', mixed)!.handler({}, ctx)).toBe('exact');
   });
 
   it('extracts and URL-decodes params', () => {

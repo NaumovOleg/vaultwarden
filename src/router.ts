@@ -1,7 +1,17 @@
+import type { Store } from './store';
+
 export interface Route {
   method: string;
   pattern: string;
-  handler: (params: Record<string, string>) => unknown;
+  auth?: boolean;
+  handler: (params: Record<string, string>, ctx: RouteContext) => unknown;
+}
+
+export interface RouteContext {
+  store: Store;
+  bodyRaw: string;
+  bodyForm: URLSearchParams;
+  bodyJson: Record<string, any>;
 }
 
 export interface Match {
