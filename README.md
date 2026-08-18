@@ -107,10 +107,23 @@ account in the Web Vault — sign-ups must be open at that point
 
 ## Backup / restore
 
-- DynamoDB: **PITR is on** for `VaultTable`, and the table is `RETAIN` — the
-  vault survives stack deletion, and point-in-time restore covers data loss.
-- S3: versioning on `attachments`.
-- A full restore runbook is a Phase 7 artifact; skeleton only for now.
+- DynamoDB: **PITR is on** for `VaultTable` (35 days), and the table is
+  `RETAIN` — the vault survives stack deletion, and point-in-time restore
+  covers data loss.
+- S3: versioning on `attachments` (every version recoverable).
+- **Full runbook: [`docs/ops/backup-restore.md`](docs/ops/backup-restore.md)** —
+  PITR restore → repoint `VAULT_TABLE` → attachments version recovery → smoke
+  checklist.
+
+## Monitoring
+
+- **Alarms**: Lambda errors and API 5xx page `vaultwarden:alertEmail` via SNS
+  within one 5-minute period.
+- **Budget**: `CostGuard` alerts at $1/month forecast — set
+  `vaultwarden:alertEmail` in `cdk.json` or neither budget nor alarms are
+  created (deploy-time warning).
+- **Logs**: Lambda logs to CloudWatch (`/aws/lambda/<name>`); 2FA email codes
+  and start-up lines are visible there.
 
 ## Cost
 
