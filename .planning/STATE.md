@@ -2,6 +2,7 @@
 
 ## Current Position
 - **Phase:** 3 (Vault Core) — **code-complete** (plans 01-03: profile/keys/sync, cipher CRUD/trash, folders/import/account mgmt; 100 tests green). **Deploy + human web-vault check is OWNER-RUN** — see `.planning/phases/03-vault-core/03-SUMMARY.md` "Deferred / next".
+- **Next:** Phase 4 (Attachments & Sends) — plans 01-02 written at `.planning/phases/04-attachments-sends/`, execution in progress.
 - **Next:** Owner: `npm run webvault && npx cdk deploy --context vaultwarden:signupsAllowed=true`, `bash scripts/e2e-auth.sh https://vaultwarden.free-bert.online`, `bash scripts/e2e-vault.sh https://vaultwarden.free-bert.online`, redeploy signups=false, human web-vault personal-vault check. Then Phase 4 (attachments).
 - **Completed:** PROJECT.md, config, research (4 reports), FEATURES.md, REQUIREMENTS.md, ROADMAP.md, phase-1 (3 plans executed), phase-2 plans 01-03 (72 tests green), phase-3 plans 01-03 (100 tests green)
 
