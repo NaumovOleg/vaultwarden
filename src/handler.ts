@@ -1,6 +1,6 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResult } from 'aws-lambda';
 import { config, alive, now, version, domainsGet, domainsPut, hibpBreach } from './endpoints/misc';
-import { register, prelogin, token, endsession } from './endpoints/identity';
+import { register, sendVerificationEmail, prelogin, token, endsession } from './endpoints/identity';
 import { deviceList, deviceCreate, deviceById, deviceRegisterToken, deviceClearToken } from './endpoints/devices';
 import {
   profile,
@@ -152,6 +152,7 @@ export const defaultRoutes: Route[] = [
   { method: 'GET', pattern: '/api/hibp/breach', handler: hibpBreach, auth: true },
   { method: 'GET', pattern: '/icons/:host/icon.png', handler: iconHandler },
   { method: 'GET', pattern: '/api/config', handler: config },
+  { method: 'POST', pattern: '/identity/accounts/register/send-verification-email', handler: sendVerificationEmail },
   { method: 'POST', pattern: '/identity/accounts/register', handler: register },
   { method: 'POST', pattern: '/api/accounts/register', handler: register },
   { method: 'POST', pattern: '/identity/accounts/prelogin', handler: prelogin },

@@ -57,6 +57,15 @@ export function normalizeKdf(kdf: unknown, fallback: KdfConfig): KdfConfig {
 }
 
 // POST /identity/accounts/register and POST /api/accounts/register (both paths).
+// POST /identity/accounts/register/send-verification-email — web vault shows
+// a "verify your email" step after every registration and fires this. No SMTP
+// here: accounts are created already verified (emailVerified: true), so the
+// right answer is an empty success — the client keeps the flow moving and a
+// real verification code can be wired up when mail sending lands.
+export async function sendVerificationEmail(): Promise<unknown> {
+  return json(200, {});
+}
+
 export async function register(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
   if (process.env.SIGNUPS_ALLOWED !== 'true') {
     throw new BitwardenError(403, 'Registration is disabled.');

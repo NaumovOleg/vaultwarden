@@ -3,13 +3,14 @@ import { createHandler } from '../src/handler';
 import type { Route } from '../src/router';
 import { MemoryStore } from '../src/store';
 import { profile, revisionDate, keys, sync, changePassword, changeKdf, rotateSecurityStamp, verifyPassword, deleteAccount, updateProfile } from '../src/endpoints/accounts';
-import { register, token } from '../src/endpoints/identity';
+import { register, sendVerificationEmail, token } from '../src/endpoints/identity';
 
 const PASSWORD = Buffer.from('client-hash').toString('base64');
 const NEW_PASSWORD = Buffer.from('new-client-hash').toString('base64');
 
 const routes: Route[] = [
   { method: 'POST', pattern: '/identity/accounts/register', handler: register },
+  { method: 'POST', pattern: '/identity/accounts/register/send-verification-email', handler: sendVerificationEmail },
   { method: 'POST', pattern: '/identity/connect/token', handler: token },
   { method: 'GET', pattern: '/api/accounts/profile', handler: profile, auth: true },
   { method: 'GET', pattern: '/api/accounts/revision-date', handler: revisionDate, auth: true },
@@ -84,6 +85,13 @@ describe('profile + sync bundle', () => {
   });
   afterAll(() => {
     process.env.SIGNUPS_ALLOWED = oldSignups;
+  });
+
+  it('send-verification-email answers 200 (no SMTP: accounts are born verified)', async () => {
+    const env = makeEnv();
+    const r = await env.handler(ev('POST', '/identity/accounts/register/send-verification-email', JSON.stringify({ email: 'x@example.com' })));
+    expect(r.statusCode).toBe(200);
+    expect(JSON.parse(r.body as string)).toEqual({});
   });
 
   it('duplicate email resolves to the newest account', async () => {
