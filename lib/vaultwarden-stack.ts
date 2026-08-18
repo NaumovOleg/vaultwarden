@@ -183,7 +183,9 @@ export class VaultwardenStack extends cdk.Stack {
 
   private apiBehavior(api: cdk.aws_apigatewayv2.HttpApi): cloudfront.BehaviorOptions {
     return {
-      origin: new origins.HttpOrigin(api.apiEndpoint.replace(/^https?:\/\//, '')),
+      // api.apiEndpoint is a lazy token here, so stripping its scheme is a no-op
+      // at synth time; build the hostname from the apiId attribute instead.
+      origin: new origins.HttpOrigin(`${api.apiId}.execute-api.${this.region}.amazonaws.com`),
       viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
       cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
     };
