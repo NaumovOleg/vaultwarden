@@ -164,6 +164,23 @@ export class VaultwardenStack extends cdk.Stack {
       },
     });
 
+    // DNS is owned by the stack: the CNAME/Alias must follow the distribution
+    // (CloudFront rejects an alias whose record points to another distribution).
+    const hostedZoneId = this.node.tryGetContext('vaultwarden:hostedZoneId');
+    if (hostedZoneId) {
+      const hostname = new URL(domain).hostname;
+      new cdk.aws_route53.ARecord(this, 'DomainAlias', {
+        zone: cdk.aws_route53.HostedZone.fromHostedZoneAttributes(this, 'Zone', {
+          hostedZoneId,
+          zoneName: hostname.split('.').slice(1).join('.'),
+        }),
+        recordName: hostname,
+        target: cdk.aws_route53.RecordTarget.fromAlias(
+          new cdk.aws_route53_targets.CloudFrontTarget(this.distribution),
+        ),
+      });
+    }
+
     new cdk.aws_s3_deployment.BucketDeployment(this, 'WebvaultDeployment', {
       sources: [
         // Static pages only. The webvault bundle (~90MB, 120+ files) is uploaded
