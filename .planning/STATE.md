@@ -1,9 +1,9 @@
 # STATE.md — Project Memory
 
 ## Current Position
-- **Phase:** 1 (Serverless Skeleton) — code complete, **deploy pending** (owner deploys; `npx cdk deploy` after `npm run webvault`)
-- **Next:** after deploy smoke pass → `/gsd:plan-phase 2` (auth: accounts, tokens, ciphers, sync)
-- **Completed:** PROJECT.md, config, research (4 reports), FEATURES.md, REQUIREMENTS.md, ROADMAP.md, phase-1 plans (3) + execution (3 plans; plans 01–02 fully verified, plan 03 code done, live deploy + browser checkpoint outstanding)
+- **Phase:** 2 (Identity & Auth) — **planned**, not executed
+- **Next:** `/gsd:execute-phase 2` — 3 plans, 3 waves (01 storage+crypto+register → 02 connect/token → 03 devices+harness+deploy handoff)
+- **Completed:** PROJECT.md, config, research (4 reports), FEATURES.md, REQUIREMENTS.md, ROADMAP.md, phase-1 (3 plans executed, code-complete), phase-2 plans (3)
 
 ## Project Facts
 - Full custom Bitwarden-compatible server: Node 22 Lambda + DynamoDB + S3, CDK v2 rewrite
@@ -29,4 +29,5 @@
 
 ## Context Budget Notes
 - Phase 1 fully executed at code level: 3 plans, 3 commits, 31 tests green, offline synth green.
-- Phase 1 deploy deferred by owner decision ("write the whole project, then I deploy").
+- Phase 1 deploy deferred by owner decision ("write the whole project, then I deploy"). Same policy applies to every later phase's deploy task.
+- Phase 2 planned (3 plans); key execution-time verification required: exact `authenticated_response`/`twofactor_auth` field shapes from vaultwarden main `src/api/identity.rs`, and `password_iterations` default from `src/config.rs`.
