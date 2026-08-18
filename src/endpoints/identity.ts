@@ -77,6 +77,17 @@ export async function register(params: Record<string, string>, ctx: RouteContext
     throw new BitwardenError(400, 'An account with this email already exists.');
   }
 
+  // No-email invite flow: register may arrive with orgInviteToken; validate
+  // before creating the account so a bad token leaves no orphan user.
+  const inviteToken = String(body.orgInviteToken ?? '').trim();
+  let invitedMember: Awaited<ReturnType<typeof ctx.store.getOrgUserByToken>> | null = null;
+  if (inviteToken !== '') {
+    invitedMember = await ctx.store.getOrgUserByToken(inviteToken);
+    if (!invitedMember || invitedMember.status !== 0 || invitedMember.userId) {
+      throw badRequest('Invalid or expired invitation token.');
+    }
+  }
+
   const keys = (jsonValue(body, 'keys') ?? {}) as Record<string, unknown>;
   const salt = randomBytes(64);
   const kdf = normalizeKdf(auth.kdf, FALLBACK_KDF);
@@ -114,6 +125,22 @@ export async function register(params: Record<string, string>, ctx: RouteContext
     createdAt: now.toISOString(),
   };
   await ctx.store.putUser(user);
+
+  // Bind the account to the invitation now that the user exists.
+  if (invitedMember) {
+    const now = new Date().toISOString();
+    await ctx.store.deleteOrgUser(invitedMember.orgId, invitedMember.id);
+    await ctx.store.putOrgUser({
+      ...invitedMember,
+      pk: `ORGUSER#${invitedMember.orgId}#${id}`,
+      id,
+      userId: id,
+      status: 2,
+      accessToken: null,
+      revisionDate: now,
+    });
+  }
+
   return json(200, {});
 }
 

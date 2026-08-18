@@ -22,6 +22,25 @@ async function userOrgsJson(ctx: RouteContext) {
   return out;
 }
 
+async function userPoliciesJson(ctx: RouteContext): Promise<Record<string, unknown>[]> {
+  const memberships = await ctx.store.listOrganizationsForUser(ctx.user!.id);
+  const out: Record<string, unknown>[] = [];
+  for (const m of memberships) {
+    if (m.status < 2) continue;
+    for (const p of await ctx.store.listPolicies(m.orgId)) {
+      out.push({
+        object: 'policy',
+        id: p.id,
+        organizationId: p.organizationId,
+        type: p.type,
+        enabled: p.enabled,
+        data: p.data,
+      });
+    }
+  }
+  return out;
+}
+
 function json(statusCode: number, body: unknown) {
   return { statusCode, headers: JSON_HEADERS, body: JSON.stringify(body) };
 }
@@ -145,7 +164,7 @@ export async function sync(params: Record<string, string>, ctx: RouteContext): P
   return json(200, {
     ...bundle,
     collections: collections.map((c) => collectionJson(c)),
-    policies: [],
+    policies: await userPoliciesJson(ctx),
     ciphers: await Promise.all(ciphers.map((c) => cipherJson(c, 'cipherDetails', ctx.objects))),
     domains: excludeDomains ? null : domainsJson(),
     sends: sends.map(sendJson),

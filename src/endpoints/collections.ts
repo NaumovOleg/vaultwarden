@@ -96,7 +96,7 @@ export async function collectionCreate(params: Record<string, string>, ctx: Rout
     // default: all confirmed members (plan 01 scope: owner/admin/user)
     users = (await ctx.store.listOrgUsers(params.id))
       .filter((m) => m.status === 2)
-      .map((m) => ({ id: m.userId, readOnly: false, hidePasswords: false }));
+      .map((m) => ({ id: m.userId ?? m.id, readOnly: false, hidePasswords: false }));
   }
   const id = newUuid();
   const col: CollectionItem = {

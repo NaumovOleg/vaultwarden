@@ -63,6 +63,21 @@ import {
   collectionUpdate,
   collectionDelete,
 } from './endpoints/collections';
+import {
+  memberInvite,
+  memberReinvite,
+  memberReinviteBulk,
+  memberListAll,
+  memberListMini,
+  memberUpdate,
+  memberDelete,
+  memberDeleteBulk,
+  memberRevoke,
+  memberRestore,
+  memberPublicKeys,
+  memberAccept,
+} from './endpoints/members';
+import { policyList, policyGet, policyUpdate } from './endpoints/policies';
 import { BitwardenError, internalError, notFound, toErrorBody } from './errors';
 import { match, Route, RouteContext } from './router';
 import { Store, MemoryStore } from './store';
@@ -154,6 +169,23 @@ const defaultRoutes: Route[] = [
   { method: 'POST', pattern: '/api/organizations/:id/delete', handler: orgDelete, auth: true },
   { method: 'DELETE', pattern: '/api/organizations/:id', handler: orgDelete, auth: true },
   { method: 'POST', pattern: '/api/organizations/:id/leave', handler: orgLeave, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/users/invite', handler: memberInvite, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/users/reinvite', handler: memberReinviteBulk, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/users/delete', handler: memberDeleteBulk, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/users/public-keys', handler: memberPublicKeys, auth: true },
+  { method: 'GET', pattern: '/api/organizations/:id/users/mini-details', handler: memberListMini, auth: true },
+  { method: 'GET', pattern: '/api/organizations/:id/users', handler: memberListAll, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/users/:memberId/reinvite', handler: memberReinvite, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/users/:memberId/accept', handler: memberAccept, auth: true },
+  { method: 'PUT', pattern: '/api/organizations/:id/users/:memberId/revoke', handler: memberRevoke, auth: true },
+  { method: 'PUT', pattern: '/api/organizations/:id/users/:memberId/restore', handler: memberRestore, auth: true },
+  { method: 'PUT', pattern: '/api/organizations/:id/users/:memberId', handler: memberUpdate, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/users/:memberId', handler: memberUpdate, auth: true },
+  { method: 'DELETE', pattern: '/api/organizations/:id/users/:memberId', handler: memberDelete, auth: true },
+  { method: 'GET', pattern: '/api/organizations/:id/policies', handler: policyList, auth: true },
+  { method: 'GET', pattern: '/api/organizations/:id/policies/:polType', handler: policyGet, auth: true },
+  { method: 'PUT', pattern: '/api/organizations/:id/policies/:polType', handler: policyUpdate, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/policies/:polType', handler: policyUpdate, auth: true },
   { method: 'GET', pattern: '/api/collections', handler: collectionListAll, auth: true },
   { method: 'GET', pattern: '/api/organizations/:id/collections', handler: collectionListForOrg, auth: true },
   { method: 'GET', pattern: '/api/organizations/:id/collections/details', handler: collectionListForOrg, auth: true },

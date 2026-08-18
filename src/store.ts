@@ -149,17 +149,29 @@ export interface SendItem {
   revisionDate: string;
 }
 
-// Status: 0=invited, 1=accepted, 2=confirmed. Type: 0=owner, 1=admin, 2=user, 3=manager.
+// Status: 0=invited, 1=accepted, 2=confirmed, -1=revoked. Type: 0=owner, 1=admin, 2=user, 3=manager.
+// id = pk suffix: userId once bound, invite uuid while status 0 (no account yet).
 export interface OrgUserItem {
-  pk: string; // ORGUSER#{orgId}#{userId}
+  pk: string; // ORGUSER#{orgId}#{id}
   sk: string; // ORGUSER
+  id: string;
   orgId: string;
-  userId: string;
+  userId: string | null;
   email: string;
   status: number;
   type: number;
-  accessToken: string | null; // invite token (no-email accept, phase 5 plan 02)
+  accessToken: string | null; // invite token (no-email accept)
   revisionDate: string;
+}
+
+export interface PolicyItem {
+  pk: string; // ORG#{orgId}#POLICY#{type}
+  sk: string; // POLICY
+  id: string;
+  organizationId: string;
+  type: number;
+  enabled: boolean;
+  data: string; // JSON string, relayed verbatim
 }
 
 export interface OrganizationItem {
@@ -234,12 +246,16 @@ export interface Store {
   getOrgUser(orgId: string, userId: string): Promise<OrgUserItem | null>;
   listOrgUsers(orgId: string): Promise<OrgUserItem[]>;
   listOrganizationsForUser(userId: string): Promise<OrgUserItem[]>;
-  deleteOrgUser(orgId: string, userId: string): Promise<void>;
+  deleteOrgUser(orgId: string, memberId: string): Promise<void>;
   putCollection(col: CollectionItem): Promise<void>;
   getCollection(orgId: string, collectionId: string): Promise<CollectionItem | null>;
   listCollectionsForOrg(orgId: string): Promise<CollectionItem[]>;
   listCollectionsForUser(userId: string): Promise<CollectionItem[]>;
   deleteCollection(orgId: string, collectionId: string): Promise<void>;
+  getOrgUserByToken(token: string): Promise<OrgUserItem | null>;
+  putPolicy(policy: PolicyItem): Promise<void>;
+  getPolicy(orgId: string, type: number): Promise<PolicyItem | null>;
+  listPolicies(orgId: string): Promise<PolicyItem[]>;
 }
 
 const TABLE = process.env.VAULT_TABLE ?? '';
@@ -532,22 +548,38 @@ export class DynamoStore implements Store {
       Key: { pk: `ORG#${orgId}`, sk: 'ORG' },
     }));
     const members = await this.listOrgUsers(orgId);
-    for (const m of members) await this.deleteOrgUser(orgId, m.userId);
+    for (const m of members) await this.deleteOrgUser(orgId, m.id);
   }
 
   async putOrgUser(member: OrgUserItem): Promise<void> {
     await this.db.send(new PutCommand({
       TableName: this.table,
-      Item: { ...member, GSI1PK: `USERORGS#${member.userId}`, GSI1SK: 'ORGUSER' },
+      Item: {
+        ...member,
+        // bound → user's org list; invited (no account yet) → invite token lookup
+        GSI1PK: member.userId ? `USERORGS#${member.userId}` : `INVITE#${member.accessToken}`,
+        GSI1SK: 'ORGUSER',
+      },
     }));
   }
 
-  async getOrgUser(orgId: string, userId: string): Promise<OrgUserItem | null> {
+  async getOrgUser(orgId: string, memberId: string): Promise<OrgUserItem | null> {
     const res = await this.db.send(new GetCommand({
       TableName: this.table,
-      Key: { pk: `ORGUSER#${orgId}#${userId}`, sk: 'ORGUSER' },
+      Key: { pk: `ORGUSER#${orgId}#${memberId}`, sk: 'ORGUSER' },
     }));
     return (res.Item as OrgUserItem | undefined) ?? null;
+  }
+
+  async getOrgUserByToken(token: string): Promise<OrgUserItem | null> {
+    const res = await this.db.send(new QueryCommand({
+      TableName: this.table,
+      IndexName: 'GSI1',
+      KeyConditionExpression: 'GSI1PK = :pk',
+      ExpressionAttributeValues: { ':pk': `INVITE#${token}` },
+      Limit: 1,
+    }));
+    return (res.Items?.[0] as OrgUserItem | undefined) ?? null;
   }
 
   async listOrgUsers(orgId: string): Promise<OrgUserItem[]> {
@@ -569,11 +601,35 @@ export class DynamoStore implements Store {
     return (res.Items as OrgUserItem[] | undefined) ?? [];
   }
 
-  async deleteOrgUser(orgId: string, userId: string): Promise<void> {
+  async deleteOrgUser(orgId: string, memberId: string): Promise<void> {
     await this.db.send(new DeleteCommand({
       TableName: this.table,
-      Key: { pk: `ORGUSER#${orgId}#${userId}`, sk: 'ORGUSER' },
+      Key: { pk: `ORGUSER#${orgId}#${memberId}`, sk: 'ORGUSER' },
     }));
+  }
+
+  async putPolicy(policy: PolicyItem): Promise<void> {
+    await this.db.send(new PutCommand({
+      TableName: this.table,
+      Item: { ...policy },
+    }));
+  }
+
+  async getPolicy(orgId: string, type: number): Promise<PolicyItem | null> {
+    const res = await this.db.send(new GetCommand({
+      TableName: this.table,
+      Key: { pk: `ORG#${orgId}#POLICY#${type}`, sk: 'POLICY' },
+    }));
+    return (res.Item as PolicyItem | undefined) ?? null;
+  }
+
+  async listPolicies(orgId: string): Promise<PolicyItem[]> {
+    const res = await this.db.send(new QueryCommand({
+      TableName: this.table,
+      KeyConditionExpression: 'begins_with(pk, :pk) AND sk = :sk',
+      ExpressionAttributeValues: { ':pk': `ORG#${orgId}#POLICY#`, ':sk': 'POLICY' },
+    }));
+    return (res.Items as PolicyItem[] | undefined) ?? [];
   }
 
   async putCollection(col: CollectionItem): Promise<void> {
@@ -643,6 +699,7 @@ export class MemoryStore implements Store {
   private allOrgs: OrganizationItem[] = [];
   private allOrgUsers: OrgUserItem[] = [];
   private allCollections: CollectionItem[] = [];
+  private allPolicies: PolicyItem[] = [];
 
   async getUserByEmail(email: string): Promise<UserItem | null> {
     return this.usersByEmail.get(email.toLowerCase()) ?? null;
@@ -818,8 +875,13 @@ export class MemoryStore implements Store {
     this.allOrgUsers.push({ ...member });
   }
 
-  async getOrgUser(orgId: string, userId: string): Promise<OrgUserItem | null> {
-    const found = this.allOrgUsers.find((m) => m.pk === `ORGUSER#${orgId}#${userId}`);
+  async getOrgUser(orgId: string, memberId: string): Promise<OrgUserItem | null> {
+    const found = this.allOrgUsers.find((m) => m.pk === `ORGUSER#${orgId}#${memberId}`);
+    return found ? { ...found } : null;
+  }
+
+  async getOrgUserByToken(token: string): Promise<OrgUserItem | null> {
+    const found = this.allOrgUsers.find((m) => m.accessToken === token);
     return found ? { ...found } : null;
   }
 
@@ -831,8 +893,22 @@ export class MemoryStore implements Store {
     return this.allOrgUsers.filter((m) => m.userId === userId).map((m) => ({ ...m }));
   }
 
-  async deleteOrgUser(orgId: string, userId: string): Promise<void> {
-    this.allOrgUsers = this.allOrgUsers.filter((m) => m.pk !== `ORGUSER#${orgId}#${userId}`);
+  async deleteOrgUser(orgId: string, memberId: string): Promise<void> {
+    this.allOrgUsers = this.allOrgUsers.filter((m) => m.pk !== `ORGUSER#${orgId}#${memberId}`);
+  }
+
+  async putPolicy(policy: PolicyItem): Promise<void> {
+    this.allPolicies = this.allPolicies.filter((p) => p.pk !== policy.pk);
+    this.allPolicies.push({ ...policy });
+  }
+
+  async getPolicy(orgId: string, type: number): Promise<PolicyItem | null> {
+    const found = this.allPolicies.find((p) => p.pk === `ORG#${orgId}#POLICY#${type}`);
+    return found ? { ...found } : null;
+  }
+
+  async listPolicies(orgId: string): Promise<PolicyItem[]> {
+    return this.allPolicies.filter((p) => p.pk.startsWith(`ORG#${orgId}#POLICY#`)).map((p) => ({ ...p }));
   }
 
   async putCollection(col: CollectionItem): Promise<void> {

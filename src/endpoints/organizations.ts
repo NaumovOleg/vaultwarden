@@ -59,13 +59,13 @@ export function orgJson(org: OrganizationItem, member: OrgUserItem): Record<stri
 async function requireOrg(
   ctx: RouteContext,
   orgId: string,
-  minType = 0,
+  maxType = 3,
 ): Promise<{ org: OrganizationItem; member: OrgUserItem }> {
   const org = await ctx.store.getOrganization(orgId);
   if (!org) throw notFoundErr();
   const member = await ctx.store.getOrgUser(orgId, ctx.user!.id);
   if (!member || member.status < 2) throw notFoundErr();
-  if (member.type > minType) throw forbidden('You do not have permission to do this.');
+  if (member.type > maxType) throw forbidden('You do not have permission to do this.');
   return { org, member };
 }
 
@@ -96,6 +96,7 @@ export async function orgCreate(params: Record<string, string>, ctx: RouteContex
   await ctx.store.putOrgUser({
     pk: `ORGUSER#${id}#${user.id}`,
     sk: 'ORGUSER',
+    id: user.id,
     orgId: id,
     userId: user.id,
     email: user.email,

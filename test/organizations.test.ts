@@ -23,6 +23,21 @@ import {
   collectionUpdate,
   collectionDelete,
 } from '../src/endpoints/collections';
+import {
+  memberInvite,
+  memberReinvite,
+  memberReinviteBulk,
+  memberListAll,
+  memberListMini,
+  memberUpdate,
+  memberDelete,
+  memberDeleteBulk,
+  memberRevoke,
+  memberRestore,
+  memberPublicKeys,
+  memberAccept,
+} from '../src/endpoints/members';
+import { policyList, policyGet, policyUpdate } from '../src/endpoints/policies';
 
 const PASSWORD = Buffer.from('client-hash').toString('base64');
 
@@ -51,6 +66,23 @@ const routes: Route[] = [
   { method: 'POST', pattern: '/api/organizations/:id/collections/:collectionId', handler: collectionUpdate, auth: true },
   { method: 'DELETE', pattern: '/api/organizations/:id/collections/:collectionId', handler: collectionDelete, auth: true },
   { method: 'POST', pattern: '/api/organizations/:id/collections/:collectionId/delete', handler: collectionDelete, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/users/invite', handler: memberInvite, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/users/reinvite', handler: memberReinviteBulk, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/users/delete', handler: memberDeleteBulk, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/users/public-keys', handler: memberPublicKeys, auth: true },
+  { method: 'GET', pattern: '/api/organizations/:id/users/mini-details', handler: memberListMini, auth: true },
+  { method: 'GET', pattern: '/api/organizations/:id/users', handler: memberListAll, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/users/:memberId/reinvite', handler: memberReinvite, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/users/:memberId/accept', handler: memberAccept, auth: true },
+  { method: 'PUT', pattern: '/api/organizations/:id/users/:memberId/revoke', handler: memberRevoke, auth: true },
+  { method: 'PUT', pattern: '/api/organizations/:id/users/:memberId/restore', handler: memberRestore, auth: true },
+  { method: 'PUT', pattern: '/api/organizations/:id/users/:memberId', handler: memberUpdate, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/users/:memberId', handler: memberUpdate, auth: true },
+  { method: 'DELETE', pattern: '/api/organizations/:id/users/:memberId', handler: memberDelete, auth: true },
+  { method: 'GET', pattern: '/api/organizations/:id/policies', handler: policyList, auth: true },
+  { method: 'GET', pattern: '/api/organizations/:id/policies/:polType', handler: policyGet, auth: true },
+  { method: 'PUT', pattern: '/api/organizations/:id/policies/:polType', handler: policyUpdate, auth: true },
+  { method: 'POST', pattern: '/api/organizations/:id/policies/:polType', handler: policyUpdate, auth: true },
 ];
 
 function makeEnv() {
@@ -66,11 +98,13 @@ function ev(
   token?: string,
   contentType = 'application/json',
 ): APIGatewayProxyEventV2 {
+  const [path, qs] = rawPath.split('?', 2);
   const headers: Record<string, string> = {};
   if (token) headers['authorization'] = `Bearer ${token}`;
   if (body) headers['content-type'] = contentType;
   return {
-    rawPath,
+    rawPath: path,
+    rawQueryString: qs ?? '',
     body,
     headers,
     requestContext: { http: { method }, requestId: 'tr' },
@@ -238,5 +272,207 @@ describe('organizations', () => {
     const userId = (await env.store.getUserByEmail('owner@example.com'))!.id;
     await env.handler(ev('POST', '/api/accounts/delete', JSON.stringify({ masterPasswordHash: PASSWORD }), at));
     expect((await env.store.listOrganizationsForUser(userId))).toHaveLength(0);
+  });
+
+  it('invite: list, search, mini-details, reinvite, duplicate 400, last-owner guards', async () => {
+    const env = makeEnv();
+    const at = await seed(env, 'owner@example.com');
+    const orgId = await createOrg(env, at);
+
+    const inv = JSON.parse(
+      (await env.handler(
+        ev(
+          'POST',
+          `/api/organizations/${orgId}/users/invite`,
+          JSON.stringify({ emails: [{ email: 'alice@example.com', type: 2 }, { email: 'bob@example.com', type: 3 }] }),
+          at,
+        ),
+      )).body as string,
+    );
+    expect(inv.invites).toHaveLength(2);
+    const token1 = inv.invites[0].accessToken as string;
+
+    expect(
+      (await env.handler(
+        ev('POST', `/api/organizations/${orgId}/users/invite`, JSON.stringify({ emails: [{ email: 'alice@example.com', type: 2 }] }), at),
+      )).statusCode,
+    ).toBe(400);
+
+    const list = JSON.parse((await env.handler(ev('GET', `/api/organizations/${orgId}/users`, '', at))).body as string);
+    expect(list).toHaveLength(3); // owner + 2 invites
+    const alice = list.find((m: any) => m.email === 'alice@example.com');
+    expect(alice.status).toBe(0);
+    expect(alice.type).toBe(2);
+    expect(alice.object).toBe('organizationUser');
+
+    const searched = JSON.parse((await env.handler(ev('GET', `/api/organizations/${orgId}/users?search=alice`, '', at))).body as string);
+    expect(searched).toHaveLength(1);
+    const bobRow = list.find((m: any) => m.email === 'bob@example.com');
+
+    const mini = JSON.parse((await env.handler(ev('GET', `/api/organizations/${orgId}/users/mini-details`, '', at))).body as string);
+    expect(mini).toHaveLength(3);
+
+    const re = JSON.parse(
+      (await env.handler(ev('POST', `/api/organizations/${orgId}/users/${alice.id}/reinvite`, '', at))).body as string,
+    );
+    expect(re.invites[0].accessToken).not.toBe(token1);
+
+    const ownerRow = list.find((m: any) => m.type === 0);
+    expect((await env.handler(ev('DELETE', `/api/organizations/${orgId}/users/${ownerRow.id}`, '', at))).statusCode).toBe(400);
+    expect(
+      (await env.handler(ev('PUT', `/api/organizations/${orgId}/users/${ownerRow.id}`, JSON.stringify({ type: 2 }), at))).statusCode,
+    ).toBe(400);
+
+    // bulk delete the invites
+    const bulk = await env.handler(
+      ev('POST', `/api/organizations/${orgId}/users/delete`, JSON.stringify({ userIds: [alice.id, bobRow.id] }), at),
+    );
+    expect(bulk.statusCode).toBe(200);
+    expect((await env.store.listOrgUsers(orgId))).toHaveLength(1);
+  });
+
+  it('invite → accept binds account; role edit; revoke; restore; remove; public-keys', async () => {
+    const env = makeEnv();
+    const at = await seed(env, 'owner@example.com');
+    const at2 = await seed(env, 'alice@example.com');
+    const orgId = await createOrg(env, at);
+
+    const inv = JSON.parse(
+      (await env.handler(
+        ev('POST', `/api/organizations/${orgId}/users/invite`, JSON.stringify({ emails: [{ email: 'alice@example.com', type: 2 }] }), at),
+      )).body as string,
+    );
+    const tk = inv.invites[0].accessToken as string;
+    const memberId = (await env.store.listOrgUsers(orgId)).find((m) => m.email === 'alice@example.com')!.id;
+
+    expect((await env.handler(ev('GET', `/api/organizations/${orgId}`, '', at2))).statusCode).toBe(404);
+    expect(
+      (await env.handler(ev('POST', `/api/organizations/${orgId}/users/${memberId}/accept`, JSON.stringify({ token: 'nope' }), at2))).statusCode,
+    ).toBe(400);
+
+    const acc = await env.handler(
+      ev('POST', `/api/organizations/${orgId}/users/${memberId}/accept`, JSON.stringify({ token: tk }), at2),
+    );
+    expect(acc.statusCode).toBe(200);
+    const got = JSON.parse((await env.handler(ev('GET', `/api/organizations/${orgId}`, '', at2))).body as string);
+    expect(got.status).toBe(2);
+    expect(got.type).toBe(2);
+
+    const aliceId = (await env.store.getUserByEmail('alice@example.com'))!.id;
+    const keys = JSON.parse(
+      (await env.handler(ev('POST', `/api/organizations/${orgId}/users/public-keys`, JSON.stringify({ userIds: [aliceId] }), at))).body as string,
+    );
+    expect(keys).toHaveLength(1);
+    expect(keys[0].userId).toBe(aliceId);
+
+    // owner promotes alice to admin; alice cannot manage herself or owners
+    expect((await env.handler(ev('PUT', `/api/organizations/${orgId}/users/${aliceId}`, JSON.stringify({ type: 1 }), at))).statusCode).toBe(200);
+    expect(
+      (await env.handler(ev('PUT', `/api/organizations/${orgId}/users/${aliceId}`, JSON.stringify({ type: 2 }), at2))).statusCode,
+    ).toBe(403);
+    const ownerRow = (await env.store.listOrgUsers(orgId)).find((m) => m.type === 0)!;
+    expect((await env.handler(ev('PUT', `/api/organizations/${orgId}/users/${ownerRow.id}`, JSON.stringify({ type: 2 }), at2))).statusCode).toBe(403);
+
+    // revoke → org invisible; restore → visible
+    expect((await env.handler(ev('PUT', `/api/organizations/${orgId}/users/${aliceId}/revoke`, '', at))).statusCode).toBe(200);
+    expect((await env.handler(ev('GET', `/api/organizations/${orgId}`, '', at2))).statusCode).toBe(404);
+    expect((await env.handler(ev('PUT', `/api/organizations/${orgId}/users/${aliceId}/restore`, '', at))).statusCode).toBe(200);
+    expect((await env.handler(ev('GET', `/api/organizations/${orgId}`, '', at2))).statusCode).toBe(200);
+
+    expect((await env.handler(ev('DELETE', `/api/organizations/${orgId}/users/${aliceId}`, '', at))).statusCode).toBe(200);
+    expect((await env.handler(ev('GET', `/api/organizations/${orgId}`, '', at2))).statusCode).toBe(404);
+  });
+
+  it('register with orgInviteToken binds + confirms membership; bad token leaves no account', async () => {
+    const env = makeEnv();
+    const at = await seed(env, 'owner@example.com');
+    const orgId = await createOrg(env, at);
+    const inv = JSON.parse(
+      (await env.handler(
+        ev('POST', `/api/organizations/${orgId}/users/invite`, JSON.stringify({ emails: [{ email: 'bob@example.com', type: 2 }] }), at),
+      )).body as string,
+    );
+    const tk = inv.invites[0].accessToken as string;
+
+    expect(
+      (
+        await env.handler(
+          ev(
+            'POST',
+            '/identity/accounts/register',
+            JSON.stringify({ email: 'bogus@example.com', masterPasswordAuthentication: { hash: PASSWORD }, orgInviteToken: 'bad-token' }),
+          ),
+        )
+      ).statusCode,
+    ).toBe(400);
+    expect(await env.store.getUserByEmail('bogus@example.com')).toBeNull();
+
+    const r = await env.handler(
+      ev(
+        'POST',
+        '/identity/accounts/register',
+        JSON.stringify({ email: 'bob@example.com', masterPasswordAuthentication: { hash: PASSWORD }, orgInviteToken: tk }),
+      ),
+    );
+    expect(r.statusCode).toBe(200);
+
+    const login = await env.handler(
+      ev(
+        'POST',
+        '/identity/connect/token',
+        new URLSearchParams({
+          grant_type: 'password',
+          username: 'bob@example.com',
+          password: PASSWORD,
+          scope: 'api offline_access',
+          deviceIdentifier: 'dev-2',
+        }).toString(),
+        undefined,
+        'application/x-www-form-urlencoded',
+      ),
+    );
+    const at2 = JSON.parse(login.body as string).access_token as string;
+    expect((await env.handler(ev('GET', `/api/organizations/${orgId}`, '', at2))).statusCode).toBe(200);
+    const bundle = JSON.parse((await env.handler(ev('GET', '/api/sync', '', at2))).body as string);
+    expect(bundle.profile.organizations).toHaveLength(1);
+    expect(bundle.profile.organizations[0].status).toBe(2);
+  });
+
+  it('policies: owner writes, member reads, non-admin cannot write; sync relays', async () => {
+    const env = makeEnv();
+    const at = await seed(env, 'owner@example.com');
+    const at2 = await seed(env, 'alice@example.com');
+    const orgId = await createOrg(env, at);
+
+    const inv = JSON.parse(
+      (await env.handler(
+        ev('POST', `/api/organizations/${orgId}/users/invite`, JSON.stringify({ emails: [{ email: 'alice@example.com', type: 2 }] }), at),
+      )).body as string,
+    );
+    const tk = inv.invites[0].accessToken as string;
+    const memberId = (await env.store.listOrgUsers(orgId)).find((m) => m.email === 'alice@example.com')!.id;
+    await env.handler(ev('POST', `/api/organizations/${orgId}/users/${memberId}/accept`, JSON.stringify({ token: tk }), at2));
+
+    const put = await env.handler(
+      ev('PUT', `/api/organizations/${orgId}/policies/4`, JSON.stringify({ enabled: true, data: { displayName: 'X' } }), at),
+    );
+    expect(put.statusCode).toBe(200);
+    expect((put.body as string).includes('"enabled":true')).toBe(true);
+
+    const list = JSON.parse((await env.handler(ev('GET', `/api/organizations/${orgId}/policies`, '', at))).body as string);
+    expect(list).toHaveLength(1);
+    expect(list[0].type).toBe(4);
+    expect(list[0].enabled).toBe(true);
+    expect(list[0].data).toBe(JSON.stringify({ displayName: 'X' }));
+
+    expect((await env.handler(ev('GET', `/api/organizations/${orgId}/policies/4`, '', at2))).statusCode).toBe(200);
+    expect(
+      (await env.handler(ev('PUT', `/api/organizations/${orgId}/policies/4`, JSON.stringify({ enabled: false }), at2))).statusCode,
+    ).toBe(403);
+
+    const bundle = JSON.parse((await env.handler(ev('GET', '/api/sync', '', at2))).body as string);
+    expect(bundle.policies).toHaveLength(1);
+    expect(bundle.policies[0].type).toBe(4);
+    expect(bundle.policies[0].enabled).toBe(true);
   });
 });
