@@ -59,7 +59,14 @@ see `.planning/REQUIREMENTS.md` (v2 section).
 npm ci
 npm run webvault   # pins + verifies + extracts the Web Vault into static/
 npx cdk deploy
+aws s3 sync static/webvault s3://<StaticBucket>     # bucket name in Outputs
 ```
+
+The web vault upload is a manual `aws s3 sync` on purpose: the CDK
+BucketDeployment custom-resource Lambda times out at 15 min on the ~90MB /
+120-file bundle, while a local sync takes seconds. Re-run the sync after
+bumping the pinned webvault version; `prune: true` only covers the static
+pages (`accept.html`, `ea-accept.html`).
 
 Context keys in `cdk.json`:
 
