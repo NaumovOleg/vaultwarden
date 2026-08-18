@@ -82,6 +82,14 @@ import {
   memberAccept,
 } from './endpoints/members';
 import { policyList, policyGet, policyUpdate } from './endpoints/policies';
+import {
+  twoFactorList,
+  getAuthenticator,
+  authenticatorEnable,
+  authenticatorDisable,
+  getRecoveryCodes,
+  twoFactorDisable,
+} from './endpoints/two-factor';
 import { BitwardenError, internalError, notFound, toErrorBody } from './errors';
 import { match, Route, RouteContext } from './router';
 import { Store, MemoryStore } from './store';
@@ -227,6 +235,13 @@ const defaultRoutes: Route[] = [
   { method: 'DELETE', pattern: '/api/accounts', handler: deleteAccount, auth: true },
   { method: 'PUT', pattern: '/api/accounts/profile', handler: updateProfile, auth: true },
   { method: 'POST', pattern: '/api/accounts/profile', handler: updateProfile, auth: true },
+  { method: 'GET', pattern: '/api/two-factor', handler: twoFactorList, auth: true },
+  { method: 'POST', pattern: '/api/two-factor/get-authenticator', handler: getAuthenticator, auth: true },
+  { method: 'POST', pattern: '/api/two-factor/authenticator', handler: authenticatorEnable, auth: true },
+  { method: 'PUT', pattern: '/api/two-factor/authenticator', handler: authenticatorEnable, auth: true },
+  { method: 'DELETE', pattern: '/api/two-factor/authenticator', handler: authenticatorDisable, auth: true },
+  { method: 'POST', pattern: '/api/two-factor/disable', handler: twoFactorDisable, auth: true },
+  { method: 'POST', pattern: '/api/two-factor/get-recover', handler: getRecoveryCodes, auth: true },
 ];
 
 function json(statusCode: number, body: string): APIGatewayProxyResult {

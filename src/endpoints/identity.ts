@@ -7,6 +7,7 @@ import {
   verifyClientHash,
 } from '../auth';
 import { newToken, newUuid, DEFAULT_KDF, hashPassword } from '../crypto';
+import { twoFactorChallenge, verifyTwoFactorCode } from './two-factor';
 import { badRequest, BitwardenError } from '../errors';
 import type { RouteContext } from '../router';
 import type { DeviceItem, Store, UserItem } from '../store';
@@ -116,6 +117,7 @@ export async function register(params: Record<string, string>, ctx: RouteContext
     premium: true,
     twoFactorEnabled: false,
     totpSecret: null,
+    totpPendingSecret: null,
     email2faEnabled: false,
     email2faAddress: null,
     avatarColor: '#607D8B',
@@ -259,37 +261,70 @@ async function passwordGrant(ctx: RouteContext, form: Map<string, string>): Prom
     return oauthError(400, 'invalid_grant', 'This user has been disabled');
   }
 
-  const twoFactorToken = form.get('twofactortoken') ?? ctx.headers['auth-2fa'];
+  const twoFactorToken = form.get('twofactortoken') ?? ctx.headers['auth-2fa-token'];
+  const deviceId = form.get('deviceidentifier') ?? newUuid();
   if (user.twoFactorEnabled) {
+    const device = await ctx.store.getDevice(user.id, deviceId);
+
     if (!twoFactorToken) {
-      const tfa = newToken();
-      await ctx.store.putTwoFactorToken({
-        pk: `TFA#${tfa}`,
-        sk: 'TOKEN',
-        userId: user.id,
-        deviceId: '',
-        providers: [],
-        expiresAt: Math.floor(Date.now() / 1000) + TFA_TOKEN_TTL_SECONDS,
-      });
-      return json(200, {
-        error: 'invalid_grant',
-        error_description: 'Two factor required.',
-        TwoFactorProviders: [],
-        TwoFactorProviders2: {},
-        MasterPasswordPolicy: { Object: 'masterPasswordPolicy' },
-        TwoFactorToken: tfa,
-      });
+      // Remembered device: skip the challenge entirely (device flag from a
+      // previous successful 2FA login with twofactorremember=1).
+      if (device?.twoFactorRemembered) {
+        const now = new Date().toISOString();
+        await ctx.store.upsertDevice({
+          pk: `USER#${user.id}`,
+          sk: `DEV#${deviceId}`,
+          name: form.get('devicename') ?? device.name ?? null,
+          type: Number(form.get('devicetype') ?? device.type ?? 0),
+          pushToken: form.get('devicepushtoken') ?? device.pushToken ?? null,
+          creationDate: device.creationDate ?? now,
+          lastUsed: now,
+          twoFactorRemembered: true,
+        });
+      } else {
+        const tfa = newToken();
+        await ctx.store.putTwoFactorToken({
+          pk: `TFA#${tfa}`,
+          sk: 'TOKEN',
+          userId: user.id,
+          deviceId,
+          providers: [],
+          expiresAt: Math.floor(Date.now() / 1000) + TFA_TOKEN_TTL_SECONDS,
+        });
+        return json(200, twoFactorChallenge(user, tfa));
+      }
+    } else {
+      const tfaItem = await ctx.store.getTwoFactorToken(twoFactorToken);
+      if (!tfaItem || tfaItem.userId !== user.id) {
+        return INVALID_GRANT_MIN();
+      }
+      await ctx.store.deleteTwoFactorToken(twoFactorToken);
+
+      const code = form.get('twofactorcode') ?? ctx.headers['auth-2fa'] ?? '';
+      const provider = Number(form.get('twofactorprovider') ?? 0);
+      if (!code || !(await verifyTwoFactorCode(user, provider, code, ctx))) {
+        return INVALID_GRANT_MIN();
+      }
+
+      const remember = form.get('twofactorremember') === '1' || ctx.headers['auth-2fa-remember'] === '1';
+      if (remember && deviceId) {
+        const now = new Date().toISOString();
+        await ctx.store.upsertDevice({
+          pk: `USER#${user.id}`,
+          sk: `DEV#${deviceId}`,
+          name: form.get('devicename') ?? device?.name ?? null,
+          type: Number(form.get('devicetype') ?? device?.type ?? 0),
+          pushToken: form.get('devicepushtoken') ?? device?.pushToken ?? null,
+          creationDate: device?.creationDate ?? now,
+          lastUsed: now,
+          twoFactorRemembered: true,
+        });
+      }
     }
-    const tfaItem = await ctx.store.getTwoFactorToken(twoFactorToken);
-    if (!tfaItem || tfaItem.userId !== user.id) {
-      return INVALID_GRANT_MIN();
-    }
-    await ctx.store.deleteTwoFactorToken(twoFactorToken);
   }
 
   await clearFailedLogins(ctx.store, ctx.sourceIp);
 
-  const deviceId = form.get('deviceidentifier') ?? newUuid();
   await upsertDevice(ctx.store, user, form, deviceId);
   const pair = await issueSession(ctx.store, user, deviceId);
   return authenticatedResponse(user, pair);

@@ -29,6 +29,7 @@ export interface UserItem {
   premium: boolean;
   twoFactorEnabled: boolean;
   totpSecret: string | null; // base32; phase 6
+  totpPendingSecret: string | null; // key shown on the setup screen, pre-enable
   email2faEnabled: boolean; // phase 6 plan 02
   email2faAddress: string | null; // masked for display
   avatarColor: string;
@@ -237,6 +238,12 @@ export interface Store {
   putTwoFactorToken(item: TwoFactorItem): Promise<void>;
   getTwoFactorToken(token: string): Promise<TwoFactorItem | null>;
   deleteTwoFactorToken(token: string): Promise<void>;
+  putRecoveryHash(userId: string, hash: string): Promise<void>;
+  listRecoveryHashes(userId: string): Promise<string[]>;
+  deleteRecoveryHash(userId: string, hash: string): Promise<void>;
+  putEmail2faCode(userId: string, code: string, expiresAt: number): Promise<void>;
+  getEmail2faCode(userId: string): Promise<string | null>;
+  deleteEmail2faCode(userId: string): Promise<void>;
   getRate(ip: string): Promise<RateItem | null>;
   putRate(item: RateItem): Promise<void>;
   incrementRate(ip: string, ttlSeconds: number): Promise<void>;
@@ -449,6 +456,30 @@ export class DynamoStore implements Store {
     await this.db.send(new DeleteCommand({
       TableName: this.table,
       Key: { pk: `TFA#${userId}`, sk: `RECOVER#${hash}` },
+    }));
+  }
+
+  async putEmail2faCode(userId: string, code: string, expiresAt: number): Promise<void> {
+    await this.db.send(new PutCommand({
+      TableName: this.table,
+      Item: { pk: `TFA#${userId}`, sk: `EMAILCODE#${userId}`, code, expiresAt },
+    }));
+  }
+
+  async getEmail2faCode(userId: string): Promise<string | null> {
+    const res = await this.db.send(new GetCommand({
+      TableName: this.table,
+      Key: { pk: `TFA#${userId}`, sk: `EMAILCODE#${userId}` },
+    }));
+    const item = res.Item as { code?: string; expiresAt?: number } | undefined;
+    if (!item?.code || (item.expiresAt ?? 0) < Math.floor(Date.now() / 1000)) return null;
+    return item.code;
+  }
+
+  async deleteEmail2faCode(userId: string): Promise<void> {
+    await this.db.send(new DeleteCommand({
+      TableName: this.table,
+      Key: { pk: `TFA#${userId}`, sk: `EMAILCODE#${userId}` },
     }));
   }
 
@@ -838,7 +869,7 @@ export class MemoryStore implements Store {
   private users = new Map<string, UserItem>();
   private devices = new Map<string, DeviceItem>();
   private sessions = new Map<string, SessionItem>();
-  private twoFactor = new Map<string, TwoFactorItem | { pk: string; sk: string; userId: string }>();
+  private twoFactor = new Map<string, Record<string, unknown>>();
   private rates = new Map<string, RateItem>();
   private allCiphers: CipherItem[] = [];
   private allFolders: FolderItem[] = [];
@@ -912,7 +943,7 @@ export class MemoryStore implements Store {
   }
 
   async putTwoFactorToken(item: TwoFactorItem): Promise<void> {
-    this.twoFactor.set(item.pk, item);
+    this.twoFactor.set(item.pk, { ...item });
   }
 
   async getTwoFactorToken(token: string): Promise<TwoFactorItem | null> {
@@ -935,6 +966,20 @@ export class MemoryStore implements Store {
 
   async deleteRecoveryHash(userId: string, hash: string): Promise<void> {
     this.twoFactor.delete(`TFA#${userId}#RECOVER#${hash}`);
+  }
+
+  async putEmail2faCode(userId: string, code: string, expiresAt: number): Promise<void> {
+    this.twoFactor.set(`TFA#${userId}#EMAILCODE`, { pk: `TFA#${userId}`, sk: `EMAILCODE#${userId}`, code, expiresAt });
+  }
+
+  async getEmail2faCode(userId: string): Promise<string | null> {
+    const item = this.twoFactor.get(`TFA#${userId}#EMAILCODE`) as { code?: string; expiresAt?: number } | undefined;
+    if (!item?.code || (item.expiresAt ?? 0) < Math.floor(Date.now() / 1000)) return null;
+    return item.code;
+  }
+
+  async deleteEmail2faCode(userId: string): Promise<void> {
+    this.twoFactor.delete(`TFA#${userId}#EMAILCODE`);
   }
 
   async getRate(ip: string): Promise<RateItem | null> {

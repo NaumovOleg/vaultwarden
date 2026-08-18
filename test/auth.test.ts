@@ -1,4 +1,5 @@
 import type { APIGatewayProxyEventV2 } from 'aws-lambda';
+import { totpCode } from '../src/crypto';
 import { createHandler } from '../src/handler';
 import type { Route } from '../src/router';
 import { MemoryStore } from '../src/store';
@@ -175,9 +176,9 @@ describe('connect/token protocol', () => {
   it('2FA flow: second call with the token issues the pair, token is single-use', async () => {
     const { handler, store } = makeHandler();
     await registerUser(handler, 'tfa@example.com');
-    // Phase 6 enables real providers; today the gate keys off this flag.
+    const secret = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ';
     const user = (await store.getUserByEmail('tfa@example.com'))!;
-    await store.putUser({ ...user, twoFactorEnabled: true });
+    await store.putUser({ ...user, twoFactorEnabled: true, totpSecret: secret });
 
     const first = await handler(loginBody('tfa@example.com'));
     expect(first.statusCode).toBe(200);
@@ -185,8 +186,8 @@ describe('connect/token protocol', () => {
     expect(envelope).toEqual({
       error: 'invalid_grant',
       error_description: 'Two factor required.',
-      TwoFactorProviders: [],
-      TwoFactorProviders2: {},
+      TwoFactorProviders: [0],
+      TwoFactorProviders2: { '0': { Object: 'twoFactorAuthenticator', Enabled: true } },
       MasterPasswordPolicy: { Object: 'masterPasswordPolicy' },
       TwoFactorToken: expect.any(String),
     });
@@ -195,6 +196,7 @@ describe('connect/token protocol', () => {
       loginBody('tfa@example.com', {
         twoFactorToken: envelope.TwoFactorToken,
         twoFactorProvider: '0',
+        twoFactorCode: totpCode(secret),
       }),
     );
     expect(second.statusCode).toBe(200);
@@ -205,6 +207,7 @@ describe('connect/token protocol', () => {
       loginBody('tfa@example.com', {
         twoFactorToken: envelope.TwoFactorToken,
         twoFactorProvider: '0',
+        twoFactorCode: totpCode(secret),
       }),
     );
     expect(replay.statusCode).toBe(400);
@@ -214,14 +217,15 @@ describe('connect/token protocol', () => {
   it('2FA via legacy headers works', async () => {
     const { handler, store } = makeHandler();
     await registerUser(handler, 'legacy2fa@example.com');
+    const secret = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ';
     const user = (await store.getUserByEmail('legacy2fa@example.com'))!;
-    await store.putUser({ ...user, twoFactorEnabled: true });
+    await store.putUser({ ...user, twoFactorEnabled: true, totpSecret: secret });
 
     const first = await handler(loginBody('legacy2fa@example.com'));
     const tfa = JSON.parse(first.body as string).TwoFactorToken;
 
-    const ev = loginBody('legacy2fa@example.com', { twoFactorProvider: '0' });
-    (ev.headers as any)['auth-2fa'] = tfa;
+    const ev = loginBody('legacy2fa@example.com', { twoFactorToken: tfa, twoFactorProvider: '0' });
+    (ev.headers as any)['auth-2fa'] = totpCode(secret);
     (ev.headers as any)['x-requested-with'] = 'XMLHttpRequest';
     (ev.headers as any)['auth-2fa-remember'] = 'true';
     const second = await handler(ev);

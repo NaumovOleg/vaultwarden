@@ -60,6 +60,7 @@ async function makeUser(store: MemoryStore, email: string, kdf?: UserItem['kdfTy
     premium: true,
     twoFactorEnabled: false,
     totpSecret: null,
+    totpPendingSecret: null,
     email2faEnabled: false,
     email2faAddress: null,
     avatarColor: '#607D8B',

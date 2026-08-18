@@ -87,6 +87,7 @@ function bareUser(email: string): UserItem {
     premium: true,
     twoFactorEnabled: false,
     totpSecret: null,
+    totpPendingSecret: null,
     email2faEnabled: false,
     email2faAddress: null,
     avatarColor: '#607D8B',
