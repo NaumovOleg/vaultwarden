@@ -11,7 +11,7 @@ import { CostGuard } from './constructs/cost-guard';
 export class VaultwardenStack extends cdk.Stack {
   public readonly table!: dynamodb.Table;
   public readonly attachmentsBucket!: s3.Bucket;
-  public readonly staticBucket!: s3.Bucket;
+  public readonly staticBucket!: s3.IBucket;
   public readonly iconsBucket!: s3.Bucket;
   public readonly handler!: lambda.NodejsFunction;
   public readonly api!: cdk.aws_apigatewayv2.HttpApi;
@@ -66,15 +66,29 @@ export class VaultwardenStack extends cdk.Stack {
         },
       ],
     });
-    this.staticBucket = new s3.Bucket(this, 'StaticWebvaultBucket', {
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: true,
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-    });
     this.iconsBucket = new s3.Bucket(this, 'IconsBucket', {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: true,
     });
+
+    // The static bucket is external to the stack (one-time `aws s3 mb`, content
+    // uploaded locally with `aws s3 sync` — the BucketDeployment Lambda cannot
+    // handle the ~90MB webvault bundle within its 15-min timeout). Imported by
+    // name, so stack deploys/destroys never touch it.
+    const staticBucketName = this.node.tryGetContext('vaultwarden:staticBucketName');
+    if (!staticBucketName) {
+      cdk.Annotations.of(this).addWarning(
+        'vaultwarden:staticBucketName is not set: the web vault will not be served. ' +
+          'Create the bucket once (aws s3 mb) and set its name in cdk.json.',
+      );
+    }
+    this.staticBucket = staticBucketName
+      ? s3.Bucket.fromBucketName(this, 'StaticWebvaultBucket', staticBucketName)
+      : new s3.Bucket(this, 'StaticWebvaultBucket', {
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+          autoDeleteObjects: true,
+          blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+        });
 
     const version = this.node.tryGetContext('vaultwarden:version') ?? '1.0.0-dev';
     const signupsAllowed = String(
@@ -181,22 +195,40 @@ export class VaultwardenStack extends cdk.Stack {
       });
     }
 
-    new cdk.aws_s3_deployment.BucketDeployment(this, 'WebvaultDeployment', {
-      sources: [
-        // Static pages only. The webvault bundle (~90MB, 120+ files) is uploaded
-        // manually with `aws s3 sync` — the BucketDeployment custom-resource
-        // Lambda times out at 15 min on that payload (see README).
-        cdk.aws_s3_deployment.Source.asset('static', { exclude: ['webvault/**'] }),
-      ],
-      destinationBucket: this.staticBucket,
-      prune: true,
-      distribution: this.distribution,
-      distributionPaths: ['/*'],
-    });
+    // Imported buckets get no auto-generated policy: grant CloudFront OAC
+    // access explicitly (scoped to this distribution via AWS:SourceArn).
+    if (staticBucketName) {
+      new s3.BucketPolicy(this, 'StaticBucketPolicy', {
+        bucket: this.staticBucket,
+        document: new cdk.aws_iam.PolicyDocument({
+          statements: [
+            new cdk.aws_iam.PolicyStatement({
+              actions: ['s3:GetObject'],
+              resources: [this.staticBucket.arnForObjects('*')],
+              principals: [new cdk.aws_iam.ServicePrincipal('cloudfront.amazonaws.com')],
+              conditions: {
+                StringEquals: {
+                  'AWS:SourceArn': cdk.Fn.join('', [
+                    'arn:aws:cloudfront::',
+                    this.account,
+                    ':distribution/',
+                    this.distribution.distributionId,
+                  ]),
+                },
+              },
+            }),
+          ],
+        }),
+      });
+    }
 
     new cdk.CfnOutput(this, 'CdnDomainName', {
       value: `https://${this.distribution.distributionDomainName}`,
       description: 'Public URL. Put this in cdk.json as vaultwarden:domain, then redeploy.',
+    });
+    new cdk.CfnOutput(this, 'DistributionId', {
+      value: this.distribution.distributionId,
+      description: 'CloudFront distribution id, for aws cloudfront create-invalidation.',
     });
   }
 

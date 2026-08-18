@@ -56,17 +56,26 @@ see `.planning/REQUIREMENTS.md` (v2 section).
 ## Deploy
 
 ```bash
+# once: the static bucket lives outside the stack (see below)
+aws s3 mb s3://vaultwarden-static-602101700579 --region eu-west-1
+
 npm ci
 npm run webvault   # pins + verifies + extracts the Web Vault into static/
 npx cdk deploy
-aws s3 sync static/webvault s3://<StaticBucket>     # bucket name in Outputs
+aws s3 sync static s3://vaultwarden-static-602101700579   # web vault + accept pages
 ```
 
-The web vault upload is a manual `aws s3 sync` on purpose: the CDK
-BucketDeployment custom-resource Lambda times out at 15 min on the ~90MB /
-120-file bundle, while a local sync takes seconds. Re-run the sync after
-bumping the pinned webvault version; `prune: true` only covers the static
-pages (`accept.html`, `ea-accept.html`).
+The static bucket is deliberately **external to the stack** (imported by
+`vaultwarden:staticBucketName`): stack deploys/destroys never touch it, and the
+~90MB/120-file web vault is uploaded locally with `aws s3 sync` (the CDK
+BucketDeployment custom-resource Lambda times out at 15 min on that payload).
+Re-run the sync after bumping the pinned webvault version, then invalidate:
+
+```bash
+aws cloudfront create-invalidation --distribution-id <DistributionId> --paths '/*'
+```
+
+`DistributionId` and `CdnDomainName` are printed in the deploy Outputs.
 
 Context keys in `cdk.json`:
 
