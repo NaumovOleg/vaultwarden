@@ -11,6 +11,6 @@
     "declaration": true,
     "types": ["node", "jest"]
   },
-  "include": ["bin/**/*.ts", "lib/**/*.ts", "test/**/*.ts"],
+  "include": ["bin/**/*.ts", "lib/**/*.ts", "src/**/*.ts", "test/**/*.ts"],
   "exclude": ["node_modules", "cdk.out"]
 }
