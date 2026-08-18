@@ -1,6 +1,6 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResult } from 'aws-lambda';
 import { config, alive, now, version } from './endpoints/misc';
-import { register, prelogin } from './endpoints/identity';
+import { register, prelogin, token, endsession } from './endpoints/identity';
 import { BitwardenError, internalError, notFound, toErrorBody } from './errors';
 import { match, Route, RouteContext } from './router';
 import { Store, MemoryStore } from './store';
@@ -23,6 +23,8 @@ const defaultRoutes: Route[] = [
   { method: 'POST', pattern: '/identity/accounts/prelogin', handler: prelogin },
   { method: 'POST', pattern: '/identity/accounts/prelogin/password', handler: prelogin },
   { method: 'POST', pattern: '/api/accounts/prelogin', handler: prelogin },
+  { method: 'POST', pattern: '/identity/connect/token', handler: token },
+  { method: 'POST', pattern: '/identity/connect/endsession', handler: endsession },
 ];
 
 function json(statusCode: number, body: string): APIGatewayProxyResult {
@@ -34,7 +36,10 @@ function json(statusCode: number, body: string): APIGatewayProxyResult {
 function parseBody(event: APIGatewayProxyEventV2): Omit<RouteContext, 'store'> {
   const raw = event.body ?? '';
   const decoded = event.isBase64Encoded ? Buffer.from(raw, 'base64').toString('utf-8') : raw;
-  const contentType = event.headers?.['content-type'] ?? event.headers?.['Content-Type'] ?? '';
+  const rawHeaders = event.headers ?? {};
+  const headers: Record<string, string> = {};
+  for (const [k, v] of Object.entries(rawHeaders)) headers[k.toLowerCase()] = v ?? '';
+  const contentType = headers['content-type'] ?? '';
   let form: URLSearchParams;
   let jsonBody: Record<string, any> = {};
   if (contentType.includes('x-www-form-urlencoded')) {
@@ -52,7 +57,13 @@ function parseBody(event: APIGatewayProxyEventV2): Omit<RouteContext, 'store'> {
   } else {
     form = new URLSearchParams();
   }
-  return { bodyRaw: decoded, bodyForm: form, bodyJson: jsonBody };
+  return {
+    bodyRaw: decoded,
+    bodyForm: form,
+    bodyJson: jsonBody,
+    headers,
+    sourceIp: event.requestContext.http.sourceIp ?? '',
+  };
 }
 
 export function createHandler(routes: Route[], deps: Deps = defaultDeps) {

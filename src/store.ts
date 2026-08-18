@@ -26,6 +26,7 @@ export interface UserItem {
   name: string;
   enabled: boolean;
   premium: boolean;
+  twoFactorEnabled: boolean;
   createdAt: string;
 }
 
@@ -46,6 +47,8 @@ export interface SessionItem {
   type: 'access' | 'refresh';
   stamp: string;
   expiresAt: number; // epoch seconds (DynamoDB TTL)
+  pairedAccess?: string; // on refresh items: the access token of the pair
+  pairedRefresh?: string; // on access items: the refresh token of the pair
 }
 
 export interface TwoFactorItem {

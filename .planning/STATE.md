@@ -1,9 +1,9 @@
 # STATE.md — Project Memory
 
 ## Current Position
-- **Phase:** 2 (Identity & Auth) — **plan 01 executed** (storage + crypto + register/prelogin, commit 7b1cee5), **next: plan 02** (connect/token, refresh rotation, 2FA envelope, rate limit, endsession)
-- **Next:** Plan 02 (`/gsd:execute-phase 2` → 02-identity-auth/02-PLAN.md) — token issuance lands on the store from 01
-- **Completed:** PROJECT.md, config, research (4 reports), FEATURES.md, REQUIREMENTS.md, ROADMAP.md, phase-1 (3 plans executed, code-complete), phase-2 plans (3), phase-2 plan 01 (executed, 50 tests green)
+- **Phase:** 2 (Identity & Auth) — **plans 01-02 executed** (register/prelogin + connect/token suite, commits 7b1cee5, b44f9dc, next), **next: plan 03** (devices endpoints, Bearer middleware, verification harness, deploy handoff)
+- **Next:** Plan 03 (`/gsd:execute-phase 2` → 02-identity-auth/03-PLAN.md)
+- **Completed:** PROJECT.md, config, research (4 reports), FEATURES.md, REQUIREMENTS.md, ROADMAP.md, phase-1 (3 plans executed, code-complete), phase-2 plans (3), phase-2 plans 01-02 (executed, 63 tests green)
 
 ## Project Facts
 - Full custom Bitwarden-compatible server: Node 22 Lambda + DynamoDB + S3, CDK v2 rewrite
@@ -30,5 +30,6 @@
 ## Context Budget Notes
 - Phase 1 fully executed at code level: 3 plans, 3 commits, 31 tests green, offline synth green.
 - Phase 2 plan 01 executed: commit 7b1cee5, 50 tests green (6 suites), tsc + synth green. GSI1, Store (Dynamo + Memory), crypto (PBKDF2 wrap 600k), register ×2 paths, prelogin ×3 paths, body parsing, VAULT_TABLE env + write grant all live.
+- Phase 2 plan 02 executed: commit (see log), 63 tests green (7 suites). connect/token password+refresh grants, pair rotation, endsession, 2FA 200-envelope shape, per-IP rate limit, TTL on table.
 - Phase 1 deploy deferred by owner decision ("write the whole project, then I deploy"). Same policy applies to every later phase's deploy task.
 - Phase 2 planned (3 plans); key execution-time verification required: exact `authenticated_response`/`twofactor_auth` field shapes from vaultwarden main `src/api/identity.rs`, and `password_iterations` default from `src/config.rs`.

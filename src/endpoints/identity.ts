@@ -1,8 +1,16 @@
 import { randomBytes } from 'node:crypto';
-import { DEFAULT_KDF, hashPassword, newUuid } from '../crypto';
+import {
+  clearFailedLogins,
+  issueSession,
+  rateLimit,
+  recordFailedLogin,
+  verifyClientHash,
+} from '../auth';
+import { newToken, newUuid, DEFAULT_KDF, hashPassword } from '../crypto';
 import { badRequest, BitwardenError } from '../errors';
 import type { RouteContext } from '../router';
-import type { UserItem } from '../store';
+import type { DeviceItem, Store, UserItem } from '../store';
+import { TFA_TOKEN_TTL_SECONDS } from '../auth';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' };
 
@@ -92,6 +100,7 @@ export async function register(params: Record<string, string>, ctx: RouteContext
     name: String(body.name ?? ''),
     enabled: true,
     premium: true,
+    twoFactorEnabled: false,
     createdAt: new Date().toISOString(),
   };
   await ctx.store.putUser(user);
@@ -126,4 +135,169 @@ export async function prelogin(params: Record<string, string>, ctx: RouteContext
     },
     salt: null,
   });
+}
+
+// --- connect/token -----------------------------------------------------------
+
+function paramsMap(ctx: RouteContext): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const [k, v] of ctx.bodyForm) m.set(k.toLowerCase(), v);
+  for (const [k, v] of Object.entries(ctx.bodyJson)) {
+    if (typeof v === 'string' || typeof v === 'number') m.set(k.toLowerCase(), String(v));
+  }
+  return m;
+}
+
+function oauthError(status: number, error: string, description?: string) {
+  const body: Record<string, string> = { error };
+  if (description) body.error_description = description;
+  return json(status, body);
+}
+
+const INVALID_GRANT = () => oauthError(400, 'invalid_grant', 'Username or password is incorrect.');
+const INVALID_GRANT_MIN = () => oauthError(400, 'invalid_grant');
+
+function authenticatedResponse(user: UserItem, pair: { accessToken: string; refreshToken: string; accessExpiresIn: number; refreshExpiresIn: number }, twoFactorToken?: string) {
+  return json(200, {
+    access_token: pair.accessToken,
+    expires_in: pair.accessExpiresIn,
+    token_type: 'Bearer',
+    refresh_token: pair.refreshToken,
+    Key: user.akey,
+    PrivateKey: user.privateKey,
+    Kdf: user.kdfType,
+    KdfIterations: user.kdfIterations,
+    KdfMemory: user.kdfMemory,
+    KdfParallelism: user.kdfParallelism,
+    ResetMasterPassword: false,
+    ForcePasswordReset: false,
+    ApiKeyClientSecretHint: null,
+    securityStamp: user.securityStamp,
+    passwordlessLogin: false,
+    TwoFactorProviders: null,
+    ...(twoFactorToken ? { TwoFactorToken: twoFactorToken } : {}),
+  });
+}
+
+async function upsertDevice(store: Store, user: UserItem, form: Map<string, string>, deviceId: string): Promise<void> {
+  const device: DeviceItem = {
+    pk: `USER#${user.id}`,
+    sk: `DEV#${deviceId}`,
+    name: form.get('devicename') ?? null,
+    type: Number(form.get('devicetype') ?? 0),
+    pushToken: form.get('devicepushtoken') ?? null,
+    lastUsed: new Date().toISOString(),
+  };
+  await store.upsertDevice(device);
+}
+
+async function passwordGrant(ctx: RouteContext, form: Map<string, string>): Promise<unknown> {
+  const scope = form.get('scope') ?? '';
+  if (scope && !(scope.includes('api') && scope.includes('offline_access'))) {
+    return oauthError(400, 'invalid_grant', 'The scope must contain "api offline_access".');
+  }
+  if (form.get('auth_request')) {
+    return oauthError(400, 'invalid_grant', 'Auth request not found.');
+  }
+  const username = form.get('username') ?? '';
+  const password = form.get('password') ?? form.get('masterpasswordhash');
+  if (!username || !password) return INVALID_GRANT();
+
+  await rateLimit(ctx.store, ctx.sourceIp);
+
+  const user = await ctx.store.getUserByEmail(username);
+  if (!user || !verifyClientHash(user, password)) {
+    // Same response whether the email is unknown or the password is wrong.
+    await recordFailedLogin(ctx.store, ctx.sourceIp);
+    return INVALID_GRANT();
+  }
+  if (!user.enabled) {
+    return oauthError(400, 'invalid_grant', 'This user has been disabled');
+  }
+
+  const twoFactorToken = form.get('twofactortoken') ?? ctx.headers['auth-2fa'];
+  if (user.twoFactorEnabled) {
+    if (!twoFactorToken) {
+      const tfa = newToken();
+      await ctx.store.putTwoFactorToken({
+        pk: `TFA#${tfa}`,
+        sk: 'TOKEN',
+        userId: user.id,
+        deviceId: '',
+        providers: [],
+        expiresAt: Math.floor(Date.now() / 1000) + TFA_TOKEN_TTL_SECONDS,
+      });
+      return json(200, {
+        error: 'invalid_grant',
+        error_description: 'Two factor required.',
+        TwoFactorProviders: [],
+        TwoFactorProviders2: {},
+        MasterPasswordPolicy: { Object: 'masterPasswordPolicy' },
+        TwoFactorToken: tfa,
+      });
+    }
+    const tfaItem = await ctx.store.getTwoFactorToken(twoFactorToken);
+    if (!tfaItem || tfaItem.userId !== user.id) {
+      return INVALID_GRANT_MIN();
+    }
+    await ctx.store.deleteTwoFactorToken(twoFactorToken);
+  }
+
+  await clearFailedLogins(ctx.store, ctx.sourceIp);
+
+  const deviceId = form.get('deviceidentifier') ?? newUuid();
+  await upsertDevice(ctx.store, user, form, deviceId);
+  const pair = await issueSession(ctx.store, user, deviceId);
+  return authenticatedResponse(user, pair);
+}
+
+async function refreshGrant(ctx: RouteContext, form: Map<string, string>): Promise<unknown> {
+  const refreshToken = form.get('refresh_token') ?? '';
+  if (!refreshToken) return INVALID_GRANT_MIN();
+  const session = await ctx.store.getSession(refreshToken);
+  if (!session || session.type !== 'refresh') return INVALID_GRANT_MIN();
+
+  const user = await ctx.store.getUser(session.userId);
+  // Stamp mismatch: sessions were revoked (password change/logout-all).
+  if (!user || user.securityStamp !== session.stamp) {
+    await ctx.store.deleteSession(refreshToken);
+    return INVALID_GRANT_MIN();
+  }
+
+  // Rotate: the old pair dies together, the new pair is issued.
+  if (session.pairedAccess) await ctx.store.deleteSession(session.pairedAccess);
+  await ctx.store.deleteSession(refreshToken);
+
+  await upsertDevice(ctx.store, user, form, session.deviceId);
+  const pair = await issueSession(ctx.store, user, session.deviceId);
+  return authenticatedResponse(user, pair);
+}
+
+// POST /identity/connect/token — password + refresh grants, form-encoded
+// (some SDK clients send JSON; field names are case-insensitive).
+export async function token(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const form = paramsMap(ctx);
+  const grantType = form.get('grant_type') ?? '';
+  if (grantType === 'password') return passwordGrant(ctx, form);
+  if (grantType === 'refresh_token') return refreshGrant(ctx, form);
+  return oauthError(400, 'unsupported_grant_type', 'The grant type is not supported.');
+}
+
+// POST /identity/connect/endsession — deletes the pair; never errors.
+export async function endsession(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const form = paramsMap(ctx);
+  const value = form.get('refresh_token') ?? form.get('access_token') ?? form.get('token') ?? '';
+  if (value) {
+    const session = await ctx.store.getSession(value);
+    if (session) {
+      if (session.type === 'refresh' && session.pairedAccess) {
+        await ctx.store.deleteSession(session.pairedAccess);
+      }
+      if (session.type === 'access' && session.pairedRefresh) {
+        await ctx.store.deleteSession(session.pairedRefresh);
+      }
+      await ctx.store.deleteSession(value);
+    }
+  }
+  return json(200, {});
 }

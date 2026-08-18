@@ -12,6 +12,8 @@ export interface RouteContext {
   bodyRaw: string;
   bodyForm: URLSearchParams;
   bodyJson: Record<string, any>;
+  headers: Record<string, string>;
+  sourceIp: string;
 }
 
 export interface Match {

@@ -57,6 +57,7 @@ async function makeUser(store: MemoryStore, email: string, kdf?: UserItem['kdfTy
     name: email,
     enabled: true,
     premium: true,
+    twoFactorEnabled: false,
     createdAt: new Date().toISOString(),
   };
   await store.putUser(user);

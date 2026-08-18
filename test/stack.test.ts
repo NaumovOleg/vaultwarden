@@ -29,6 +29,7 @@ describe('VaultwardenStack', () => {
     t.hasResourceProperties('AWS::DynamoDB::Table', {
       BillingMode: 'PAY_PER_REQUEST',
       PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
+      TimeToLiveSpecification: { AttributeName: 'expiresAt', Enabled: true },
       AttributeDefinitions: Match.arrayWith([
         { AttributeName: 'pk', AttributeType: 'S' },
         { AttributeName: 'sk', AttributeType: 'S' },
