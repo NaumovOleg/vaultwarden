@@ -28,6 +28,9 @@ export interface UserItem {
   enabled: boolean;
   premium: boolean;
   twoFactorEnabled: boolean;
+  totpSecret: string | null; // base32; phase 6
+  email2faEnabled: boolean; // phase 6 plan 02
+  email2faAddress: string | null; // masked for display
   avatarColor: string;
   masterKeyEncryptedUserKey: string | null;
   masterKeyWrappedUserKey: string | null;
@@ -44,6 +47,7 @@ export interface DeviceItem {
   pushToken: string | null;
   creationDate: string;
   lastUsed: string;
+  twoFactorRemembered: boolean; // phase 6: skip 2FA on this device
 }
 
 export interface SessionItem {
@@ -422,6 +426,29 @@ export class DynamoStore implements Store {
     await this.db.send(new DeleteCommand({
       TableName: this.table,
       Key: { pk: `TFA#${token}`, sk: 'TOKEN' },
+    }));
+  }
+
+  async putRecoveryHash(userId: string, hash: string): Promise<void> {
+    await this.db.send(new PutCommand({
+      TableName: this.table,
+      Item: { pk: `TFA#${userId}`, sk: `RECOVER#${hash}`, userId },
+    }));
+  }
+
+  async listRecoveryHashes(userId: string): Promise<string[]> {
+    const res = await this.db.send(new QueryCommand({
+      TableName: this.table,
+      KeyConditionExpression: 'pk = :pk AND begins_with(sk, :sk)',
+      ExpressionAttributeValues: { ':pk': `TFA#${userId}`, ':sk': 'RECOVER#' },
+    }));
+    return ((res.Items ?? []) as { sk: string }[]).map((i) => i.sk.slice('RECOVER#'.length));
+  }
+
+  async deleteRecoveryHash(userId: string, hash: string): Promise<void> {
+    await this.db.send(new DeleteCommand({
+      TableName: this.table,
+      Key: { pk: `TFA#${userId}`, sk: `RECOVER#${hash}` },
     }));
   }
 
@@ -811,7 +838,7 @@ export class MemoryStore implements Store {
   private users = new Map<string, UserItem>();
   private devices = new Map<string, DeviceItem>();
   private sessions = new Map<string, SessionItem>();
-  private twoFactor = new Map<string, TwoFactorItem>();
+  private twoFactor = new Map<string, TwoFactorItem | { pk: string; sk: string; userId: string }>();
   private rates = new Map<string, RateItem>();
   private allCiphers: CipherItem[] = [];
   private allFolders: FolderItem[] = [];
@@ -889,11 +916,25 @@ export class MemoryStore implements Store {
   }
 
   async getTwoFactorToken(token: string): Promise<TwoFactorItem | null> {
-    return this.twoFactor.get(`TFA#${token}`) ?? null;
+    return (this.twoFactor.get(`TFA#${token}`) as TwoFactorItem | undefined) ?? null;
   }
 
   async deleteTwoFactorToken(token: string): Promise<void> {
     this.twoFactor.delete(`TFA#${token}`);
+  }
+
+  async putRecoveryHash(userId: string, hash: string): Promise<void> {
+    this.twoFactor.set(`TFA#${userId}#RECOVER#${hash}`, { pk: `TFA#${userId}`, sk: `RECOVER#${hash}`, userId });
+  }
+
+  async listRecoveryHashes(userId: string): Promise<string[]> {
+    return [...this.twoFactor.keys()]
+      .filter((k) => k.startsWith(`TFA#${userId}#RECOVER#`))
+      .map((k) => k.slice(`TFA#${userId}#RECOVER#`.length));
+  }
+
+  async deleteRecoveryHash(userId: string, hash: string): Promise<void> {
+    this.twoFactor.delete(`TFA#${userId}#RECOVER#${hash}`);
   }
 
   async getRate(ip: string): Promise<RateItem | null> {

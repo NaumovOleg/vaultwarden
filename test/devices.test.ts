@@ -86,6 +86,9 @@ function bareUser(email: string): UserItem {
     enabled: true,
     premium: true,
     twoFactorEnabled: false,
+    totpSecret: null,
+    email2faEnabled: false,
+    email2faAddress: null,
     avatarColor: '#607D8B',
     masterKeyEncryptedUserKey: null,
     masterKeyWrappedUserKey: null,
@@ -224,6 +227,7 @@ describe('devices endpoints', () => {
       pushToken: null,
       creationDate: new Date().toISOString(),
       lastUsed: new Date().toISOString(),
+      twoFactorRemembered: false,
     });
     const r = await env.handler(ev('GET', '/api/devices', '', accessToken));
     expect(JSON.parse(r.body as string).data).toHaveLength(1);

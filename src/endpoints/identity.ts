@@ -115,6 +115,9 @@ export async function register(params: Record<string, string>, ctx: RouteContext
     enabled: true,
     premium: true,
     twoFactorEnabled: false,
+    totpSecret: null,
+    email2faEnabled: false,
+    email2faAddress: null,
     avatarColor: '#607D8B',
     masterKeyEncryptedUserKey:
       typeof body.masterKeyEncryptedUserKey === 'string' ? body.masterKeyEncryptedUserKey : null,
@@ -227,6 +230,7 @@ async function upsertDevice(store: Store, user: UserItem, form: Map<string, stri
     pushToken: form.get('devicepushtoken') ?? null,
     creationDate: existing?.creationDate ?? now,
     lastUsed: now,
+    twoFactorRemembered: existing?.twoFactorRemembered ?? false,
   };
   await store.upsertDevice(device);
 }
