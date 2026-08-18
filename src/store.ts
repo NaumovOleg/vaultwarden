@@ -490,7 +490,8 @@ export class DynamoStore implements Store {
       const res = await this.db.send(new QueryCommand({
         TableName: this.table,
         IndexName: 'GSI2',
-        KeyConditionExpression: 'owner = :owner AND begins_with(sk, :sk)',
+        KeyConditionExpression: '#owner = :owner AND begins_with(sk, :sk)',
+        ExpressionAttributeNames: { '#owner': 'owner' },
         ExpressionAttributeValues: { ':owner': userId, ':sk': sk },
       }));
       const items = (res.Items as { pk: string; sk: string }[] | undefined) ?? [];
