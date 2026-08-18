@@ -90,7 +90,7 @@ v1 target = all 4 client types usable: Web Vault OSS, mobile (iOS/Android), desk
 | INFRA-06 | Logging (request id, auth events), CloudWatch alarms, budget alert (keep existing CostGuard pattern) | |
 | INFRA-07 | Backup/DR: DynamoDB PITR + S3 attachment versioning; restore runbook | replaces nightly SQLite backup |
 | INFRA-08 | Tests: unit (routing, serializers) + @bitwarden/sdk-based E2E script against deployed stage (register→login→sync→cipher CRUD→2FA→org) | bash `e2e-auth.sh`+`e2e-vault.sh` are the established integration harness (decision phases 7-8; SDK suite would duplicate them) |
-| INFRA-09 | Local dev: single `dev.ts` http-server wrapping handler; DynamoDB target = real AWS dev table (no emulators) | |
+| INFRA-09 | Local dev: single `dev.ts` http-server wrapping handler; DynamoDB target = real AWS dev table (no emulators) | shipped: `npm run dev` (in-memory by default, `VAULT_TABLE=…` → real DynamoDB); static pages are S3-only |
 
 ## v2 (deferred — explicit, revisited after phase 8)
 

@@ -10,6 +10,7 @@
     "test": "jest",
     "build": "tsc",
     "synth": "cdk synth",
+    "dev": "ts-node --prefer-ts-exts src/dev.ts",
     "webvault": "bash scripts/fetch-webvault.sh",
     "e2e:auth": "bash scripts/e2e-auth.sh",
     "e2e:vault": "bash scripts/e2e-vault.sh"

@@ -26,15 +26,26 @@ API + CloudFront. No containers, no EFS, no SQLite, no VPC.
 
 ## Status
 
-Phase 1 (serverless skeleton) is done at the code level: the stack synthesises,
-all tests pass, the web vault artifact is pinned and reproducible. A live
-deploy is the last checkbox.
+All 8 phases are **code-complete** (149 jest tests green, tsc clean, offline
+synth green): serverless skeleton, identity & auth, vault core (ciphers,
+folders, import, account lifecycle), attachments & sends, organizations &
+collections, 2FA (TOTP + email-code without transport), hardening (icons,
+domains, hibp stub, alarms, backup runbook), emergency access. A live deploy
+plus human checks on the real clients is the last checkbox.
 
-**Works today:** web vault boots, `/alive`, `/now`, `/api/version`, `/api/config`,
-Bitwarden 404 envelope on unknown routes.
+**Works today:** full Bitwarden-compatible API — register/prelogin/token
+(4 grants), sync, ciphers + trash/restore/purge/import, folders, attachments
+(v2 direct multipart), sends (text+file+anonymous access), organizations
+(invite/accept/confirm, collections, sharing, policies, roles), 2FA
+(TOTP + recovery codes + remember-device + email-code), emergency access
+(trust/access/takeover), devices, account management (password/kdf/
+security-stamp/verify/delete/profile), icons, settings/domains, favicon
+service. Clients: hosted Web Vault (pinned artifact), mobile, desktop,
+browser extension.
 
-**Doesn't yet:** auth and everything behind it (Phase 2+ — accounts, ciphers,
-folders, sync, orgs, attachments…).
+**Deferred/documented:** email transport of any kind (codes are surfaced in
+responses), SSO, passkeys/WebAuthn, Duo/Yubikey, org event log, billing —
+see `.planning/REQUIREMENTS.md` (v2 section).
 
 ## Prerequisites
 
@@ -76,6 +87,14 @@ curl -s -X POST $URL/identity/connect/token               # 404 Bitwarden envelo
 
 Then open `$URL/` in a browser — the Bitwarden Web Vault login page must render.
 
+Full harnesses (each step prints PASS/FAIL, exits non-zero on the first
+failure):
+
+```bash
+bash scripts/e2e-auth.sh $URL            # register → login → refresh → 2FA challenge flow
+bash scripts/e2e-vault.sh $URL           # 16 steps: vault CRUD, attachments, sends, orgs, 2FA, emergency access
+```
+
 ## Organizations (no-email invites)
 
 Organizations use the no-email invite flow: the invite endpoint returns one
@@ -92,6 +111,22 @@ password, hashes the password client-side (SHA-256 → base64) and registers the
 account bound to the invitation. After the first invite, register a regular
 account in the Web Vault — sign-ups must be open at that point
 (`vaultwarden:signupsAllowed: "true"`), then flip the flag back.
+
+## Emergency access (no-email invites)
+
+Same surfacing trick as orgs: `POST /api/emergency-access/invite` returns the
+item id and an accept token in the response. The grantee registers through
+`ea-accept.html`:
+
+```
+https://<your-domain>/ea-accept.html?id=<emergencyAccessId>&token=<emergencyAccessToken>
+```
+
+The full flow in the web vault (Settings → Emergency Access): invite → grantee
+registers via the surfaced link → grantor confirms (seals the vault key to the
+grantee's public key) → grantee initiates after the wait time → grantor
+approves → grantee views the vault or takes it over (issue a new master
+password, which resets the grantor's).
 
 ## Architecture in one screen
 
@@ -141,9 +176,15 @@ won't be told.
 ## Development
 
 ```bash
-npm test        # jest — stack assertions + router/endpoints/handler
+npm test        # jest — stack assertions + router/endpoints/handler/dev-server
+npm run dev     # local HTTP server wrapping the real handler (port 3000)
 npm run synth   # offline synthesis, no network lookups needed
 ```
+
+`npm run dev` uses an in-memory store by default; set `VAULT_TABLE=<name>` to
+target a real DynamoDB dev table (no emulators). Static pages
+(`accept.html`, `ea-accept.html`, the web vault) are S3-only and don't exist
+on the dev server — test the API with curl, the pages against a deploy.
 
 Historical pre-serverless designs live in `docs/superpowers/` (kept as
 record, not referenced).

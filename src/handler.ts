@@ -135,7 +135,7 @@ function defaultObjects(): ObjectStore {
 
 const defaultDeps: Deps = { store: new MemoryStore(), objects: defaultObjects() };
 
-const defaultRoutes: Route[] = [
+export const defaultRoutes: Route[] = [
   { method: 'GET', pattern: '/alive', handler: alive },
   { method: 'GET', pattern: '/now', handler: now },
   { method: 'GET', pattern: '/api/version', handler: version },
