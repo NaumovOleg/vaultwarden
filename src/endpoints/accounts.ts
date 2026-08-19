@@ -51,9 +51,17 @@ function profileJson(user: UserItem, orgs: Record<string, unknown>[] = []) {
     user.privateKey === null && user.publicKey === null
       ? null
       : {
-          encryptedPrivateKey: user.privateKey,
+          // Sync profile keys are parsed by PrivateKeysResponseModel, which
+          // requires "wrappedPrivateKey" — anything else throws inside
+          // syncProfile() and silently aborts the rest of the sync
+          // (orgs/policies/key-connector state never initialize).
+          wrappedPrivateKey: user.privateKey,
           publicKey: user.publicKey,
-          object: 'keyPair',
+          // Vaultwarden always sends these two; the app's AccountKeysJson
+          // has signedPublicKey as a plain nullable field, and mirroring the
+          // reference shapes keeps every client parser happy.
+          signedPublicKey: null,
+          object: 'publicKeyEncryptionKeyPair',
         };
   return {
     id: user.id,
@@ -75,12 +83,18 @@ function profileJson(user: UserItem, orgs: Record<string, unknown>[] = []) {
     usesKeyConnector: false,
     creationDate: user.createdAt,
     _status: 1,
-    accountKeys: {
-      publicKeyEncryptionKeyPair: keyPair,
-      securityState: null,
-      signatureKeyPair: null,
-      object: 'privateKeys',
-    },
+    // The app models this with a required publicKeyEncryptionKeyPair; send
+    // null (like vaultwarden) instead of an object with a null key pair,
+    // which fails the Kotlin AccountKeysJson parse for accounts without keys.
+    accountKeys:
+      user.privateKey === null && user.publicKey === null
+        ? null
+        : {
+            publicKeyEncryptionKeyPair: keyPair,
+            securityState: null,
+            signatureKeyPair: null,
+            object: 'privateKeys',
+          },
     object: 'profile',
     userDecryptionOptions: userDecryptionJson(user),
   };
@@ -92,18 +106,26 @@ function domainsJson() {
   return { equivalentDomains: [], globalEquivalentDomains: [], object: 'domains' };
 }
 
+// Shape matches the app's MasterPasswordUnlockDataJson/KdfJson: the inner kdf
+// keys are `iterations`/`memory`/`parallelism` (NOT `kdfIterations`/...), and
+// the wrapped key doubles as the encrypted key, like vaultwarden. Both key
+// slots must be non-null strings: the Kotlin MasterPasswordUnlockDataJson has
+// `masterKeyWrappedUserKey: String` (required, non-nullable) and a null value
+// there fails the sync parse with MissingFieldException.
 function userDecryptionJson(user: UserItem) {
+  const encryptedKey = user.masterKeyEncryptedUserKey ?? user.akey;
+  const wrappedKey = user.masterKeyWrappedUserKey ?? encryptedKey;
   const masterPasswordUnlock =
     user.masterKeyEncryptedUserKey || user.masterKeyWrappedUserKey
       ? {
           kdf: {
             kdfType: user.kdfType,
-            kdfIterations: user.kdfIterations,
-            kdfMemory: user.kdfMemory,
-            kdfParallelism: user.kdfParallelism,
+            iterations: user.kdfIterations,
+            memory: user.kdfMemory,
+            parallelism: user.kdfParallelism,
           },
-          masterKeyEncryptedUserKey: user.masterKeyEncryptedUserKey,
-          masterKeyWrappedUserKey: user.masterKeyWrappedUserKey,
+          masterKeyEncryptedUserKey: encryptedKey,
+          masterKeyWrappedUserKey: wrappedKey,
           salt: user.email,
         }
       : null;
@@ -174,7 +196,14 @@ export async function sync(params: Record<string, string>, ctx: RouteContext): P
     ciphers: await Promise.all(ciphers.map((c) => cipherJson(c, 'cipherDetails', ctx.objects))),
     domains: excludeDomains ? null : domainsJson(),
     sends: sends.map(sendJson),
-    userDecryptionOptions: userDecryptionJson(user),
+    organizations: orgsJson,
+    providers: [],
+    providerOrganizations: [],
+    // Top-level key is `userDecryption` (not `userDecryptionOptions`): the Android
+    // app reads syncResponse.userDecryption.masterPasswordUnlock to decide
+    // hasMasterPassword. Missing/null → it forces a logout (VaultUnlockViewModel
+    // InvalidState). Vaultwarden/identity.rs mirror the same key.
+    userDecryption: userDecryptionJson(user),
   });
 }
 

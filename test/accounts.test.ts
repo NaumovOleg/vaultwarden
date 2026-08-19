@@ -220,9 +220,10 @@ describe('profile + sync bundle', () => {
       _status: 1,
       accountKeys: {
         publicKeyEncryptionKeyPair: {
-          encryptedPrivateKey: 'priv-key',
+          wrappedPrivateKey: 'priv-key',
           publicKey: 'pub-key',
-          object: 'keyPair',
+          signedPublicKey: null,
+          object: 'publicKeyEncryptionKeyPair',
         },
         securityState: null,
         signatureKeyPair: null,
@@ -239,17 +240,12 @@ describe('profile + sync bundle', () => {
     });
   });
 
-  it('profile without keys → keyPair null but accountKeys present (pitfall 2.4)', async () => {
+  it('profile without keys → accountKeys null (like vaultwarden, pitfall 2.4)', async () => {
     const env = makeEnv();
     const at = await registerAndLogin(env, 'nokeys@example.com', { keys: {} });
     const r = await env.handler(ev('GET', '/api/accounts/profile', '', at));
     const body = JSON.parse(r.body as string);
-    expect(body.accountKeys).toEqual({
-      publicKeyEncryptionKeyPair: null,
-      securityState: null,
-      signatureKeyPair: null,
-      object: 'privateKeys',
-    });
+    expect(body.accountKeys).toBeNull();
     expect(body.privateKey).toBeNull();
   });
 
@@ -282,7 +278,9 @@ describe('profile + sync bundle', () => {
     const env = makeEnv();
     const at = await registerAndLogin(env, 'dec@example.com');
     const r = await env.handler(ev('GET', '/api/sync', '', at));
-    expect(JSON.parse(r.body as string).userDecryptionOptions).toEqual({
+    // The Android app reads the top-level `userDecryption` key (SyncResponseJson);
+    // a missing/null value makes it force a logout post-login.
+    expect(JSON.parse(r.body as string).userDecryption).toEqual({
       object: 'userDecryptionOptions',
       hasMasterPassword: false,
       masterPasswordUnlock: null,
@@ -296,11 +294,13 @@ describe('profile + sync bundle', () => {
       masterKeyWrappedUserKey: 'wrapped-user-key',
     });
     const r2 = await env.handler(ev('GET', '/api/sync', '', at2));
-    expect(JSON.parse(r2.body as string).userDecryptionOptions).toEqual({
+    // Inner kdf keys are `iterations`/`memory`/`parallelism` — matches the app's
+    // MasterPasswordUnlockDataJson/KdfJson; `kdfIterations`/etc. fail strict parse.
+    expect(JSON.parse(r2.body as string).userDecryption).toEqual({
       object: 'userDecryptionOptions',
       hasMasterPassword: true,
       masterPasswordUnlock: {
-        kdf: { kdfType: 0, kdfIterations: 600_000, kdfMemory: null, kdfParallelism: null },
+        kdf: { kdfType: 0, iterations: 600_000, memory: null, parallelism: null },
         masterKeyEncryptedUserKey: 'enc-user-key',
         masterKeyWrappedUserKey: 'wrapped-user-key',
         salt: 'dec2@example.com',

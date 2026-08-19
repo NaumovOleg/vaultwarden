@@ -20,7 +20,24 @@ export interface SessionPair {
 // for rotating (deleting) any previous pair of the same device.
 export async function issueSession(store: Store, user: UserItem, deviceId: string): Promise<SessionPair> {
   const now = Math.floor(Date.now() / 1000);
-  const accessToken = signJwt({ sub: user.id }, ACCESS_TTL_SECONDS);
+  // Official Bitwarden access tokens carry email/name/premium/device claims;
+  // clients build the account profile from them (empty email breaks the vault).
+  // The Android app parses the JWT with kotlinx.serialization into
+  // JwtTokenDataJson, which REQUIRES email_verified (Boolean) and amr
+  // (List<String>) — a missing claim makes parseJwtTokenDataOrNull return
+  // null and the app crashes with "Required value was null".
+  const accessToken = signJwt(
+    {
+      sub: user.id,
+      email: user.email,
+      email_verified: true,
+      name: user.email,
+      premium: user.premium,
+      device: deviceId,
+      amr: ['pwd'],
+    },
+    ACCESS_TTL_SECONDS,
+  );
   const refreshToken = signJwt({ sub: user.id }, REFRESH_TTL_SECONDS);
   const access: SessionItem = {
     pk: `SESS#${accessToken}`,

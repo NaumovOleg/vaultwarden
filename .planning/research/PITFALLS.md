@@ -422,3 +422,40 @@ login flows, (b) echo stored data through canonical serializers rather than raw,
   https://www.synacktiv.com/en/publications/forensic-analysis-of-bitwarden-self-hosted-server
 - Bitwarden contributing docs (crypto: master key derivation, HKDF "enc"/"mac" stretching,
   key wrapping): https://contributing.bitwarden.com/architecture/cryptography/crypto-guide
+## 3. Kotlin sync-модели строже Rust/JS: null в REQUIRED-поле = MissingFieldException
+
+Rust `bitwarden-api-api` (serde) и jslib терпят null в любом Option-поле,
+поэтому Rust-харнесс и web проходят, а Android падает. Kotlin
+`SyncResponseJson`/`UserDecryptionJson` (network module):
+- `MasterPasswordUnlockDataJson.masterKeyWrappedUserKey: String` — **REQUIRED,
+  non-nullable**. Сервер ОБЯЗАН слать не-null строку в обоих слотах
+  (`masterKeyEncryptedUserKey` + `masterKeyWrappedUserKey`). Vaultwarden
+  всегда шлёт akey в оба; у нас было `masterKeyWrappedUserKey: null` при
+  отсутствии значения в БД → sync-parse падал → баннер «не удалось
+  синхронизировать» на пустом и непустом vault. Фикс: fallback
+  `wrapped ?? encrypted ?? akey` в `userDecryptionJson` (accounts.ts) и в
+  token (`MasterKeyWrappedUserKey`).
+- `AccountKeysJson.publicKeyEncryptionKeyPair: PublicKeyEncryptionKeyPair` —
+  REQUIRED non-null при accountKeys != null → аккаунтам без ключей слать
+  `accountKeys: null` (как VW), не объект с null keyPair.
+- nullable-поля без default (masterPasswordHint, signedPublicKey,
+  v2UpgradeToken, cipher.permissions/encryptedFor/archivedDate/data) —
+  опциональны, отсутствие ключа НЕ падает (проверено: токен без
+  TwoFactorToken парсится). Но для гармонизации с эталоном VW
+  signedPublicKey/object добавляются.
+
+## 4. Недокрытые поля (нет данных сейчас — появятся с орг/созданием)
+
+- `Policy.revisionDate` — Kotlin `Policy.revisionDate: Instant?` (nullable,
+  ок), но VW отдаёт revisionDate — наш userPoliciesJson его не эмитит.
+- `Send` — Kotlin-модель требует не-null: accessCount, revisionDate,
+  hideEmail, type, deletionDate, disabled, id — наш sendJson отдаёт их;
+  nullable-слоты (authType, accessId, password, emails, file, text,
+  expirationDate, maxAccessCount, notes, name, key) опциональны.
+- `Profile.Organization` — много REQUIRED-булевых (usePolicies,
+  keyConnectorEnabled, enabled, selfHost, permissions, useGroups,
+  useDirectory, usersGetPremium, use2fa, ...) — проверить orgJson при
+  появлении организаций (тест-кейсы 2026-org).
+- prelogin: VW всегда `salt: null` (у нас salt юзера) — клиент 2026
+  использует его для masterPasswordAuthenticationHash; работает, но
+  расходится с эталоном.

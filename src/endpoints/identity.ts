@@ -161,6 +161,9 @@ export async function register(params: Record<string, string>, ctx: RouteContext
   }
 
   const keys = (jsonValue(body, 'keys') ?? {}) as Record<string, unknown>;
+  // 2026 web vault sends the account key pair as userAsymmetricKeys
+  // { publicKey, encryptedPrivateKey } instead of the legacy `keys`.
+  const userKeys = (jsonValue(body, 'userAsymmetricKeys') ?? {}) as Record<string, unknown>;
   // New clients derive the hash against a client-generated salt and send it
   // along (old clients leave it to us, some send it at the JSON root).
   const clientSaltRaw = typeof auth.salt === 'string' && auth.salt !== ''
@@ -195,8 +198,18 @@ export async function register(params: Record<string, string>, ctx: RouteContext
     // New clients skip the legacy `key` field; the wrapped user key (which
     // they do send) doubles as the account key, like vaultwarden.
     akey: String(body.key ?? '') || unlockWrappedKey || '',
-    privateKey: typeof keys.privateKey === 'string' ? keys.privateKey : null,
-    publicKey: typeof keys.publicKey === 'string' ? keys.publicKey : null,
+    privateKey:
+      typeof keys.privateKey === 'string'
+        ? keys.privateKey
+        : typeof userKeys.encryptedPrivateKey === 'string'
+          ? userKeys.encryptedPrivateKey
+          : null,
+    publicKey:
+      typeof keys.publicKey === 'string'
+        ? keys.publicKey
+        : typeof userKeys.publicKey === 'string'
+          ? userKeys.publicKey
+          : null,
     name: verifiedName ?? String(body.name ?? ''),
     masterPasswordHint:
       typeof body.masterPasswordHint === 'string' && body.masterPasswordHint !== '' ? body.masterPasswordHint : null,
@@ -245,8 +258,18 @@ export async function register(params: Record<string, string>, ctx: RouteContext
       ...invitedAccess,
       granteeId: id,
       name: typeof body.name === 'string' && body.name !== '' ? body.name : invitedAccess.name,
-      encryptedPrivateKey: typeof keys.privateKey === 'string' ? keys.privateKey : null,
-      publicKey: typeof keys.publicKey === 'string' ? keys.publicKey : null,
+      encryptedPrivateKey:
+        typeof keys.privateKey === 'string'
+          ? keys.privateKey
+          : typeof userKeys.encryptedPrivateKey === 'string'
+            ? userKeys.encryptedPrivateKey
+            : null,
+      publicKey:
+        typeof keys.publicKey === 'string'
+          ? keys.publicKey
+          : typeof userKeys.publicKey === 'string'
+            ? userKeys.publicKey
+            : null,
       token: null,
       GSI1PK: `EMERGGRANTEE#${id}`,
       status: 1,
@@ -338,7 +361,9 @@ const INVALID_GRANT_MIN = () => oauthError(400, 'invalid_grant');
 
 export function authenticatedResponse(user: UserItem, pair: { accessToken: string; refreshToken: string; accessExpiresIn: number; refreshExpiresIn: number }, twoFactorToken?: string) {
   // MasterPasswordUnlock mirrors vaultwarden: the wrapped key doubles as the
-  // account key, and the Salt slot is deprecated/unused by the clients.
+  // account key, the Salt slot is deprecated/unused by the clients, and both
+  // key slots are always non-null strings (the Kotlin
+  // MasterPasswordUnlockDataJson requires masterKeyWrappedUserKey).
   const masterPasswordUnlock = {
     Kdf: {
       KdfType: user.kdfType,
@@ -347,8 +372,8 @@ export function authenticatedResponse(user: UserItem, pair: { accessToken: strin
       Parallelism: user.kdfParallelism,
     },
     MasterKeyEncryptedUserKey: user.masterKeyEncryptedUserKey ?? user.akey,
-    MasterKeyWrappedUserKey: user.masterKeyWrappedUserKey ?? user.akey,
-    Salt: user.salt,
+    MasterKeyWrappedUserKey: user.masterKeyWrappedUserKey ?? user.masterKeyEncryptedUserKey ?? user.akey,
+    Salt: user.email,
   };
   const accountKeys =
     user.privateKey && user.publicKey
@@ -366,6 +391,9 @@ export function authenticatedResponse(user: UserItem, pair: { accessToken: strin
     access_token: pair.accessToken,
     expires_in: pair.accessExpiresIn,
     token_type: 'Bearer',
+    // scope is a required field in the SDK's LoginSuccessApiResponse; without it
+    // strict WASM clients fail the token parse (pitfall 1.3).
+    scope: 'api offline_access',
     refresh_token: pair.refreshToken,
     Key: user.akey,
     PrivateKey: user.privateKey,

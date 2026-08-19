@@ -84,6 +84,7 @@ describe('connect/token protocol', () => {
       access_token: expect.any(String),
       expires_in: 3600,
       token_type: 'Bearer',
+      scope: 'api offline_access',
       refresh_token: expect.any(String),
       Key: 'akey-value',
       PrivateKey: 'priv',
@@ -361,7 +362,9 @@ describe('connect/token protocol', () => {
     const login = await handler(loginBody('odd-salt@example.com', { password: clientHash }));
     expect(login.statusCode).toBe(200);
     const tokenBody = JSON.parse(login.body as string);
-    expect(tokenBody.UserDecryptionOptions.MasterPasswordUnlock.Salt).toBe(salt);
+    // Vaultwarden always reports the email as Salt here; the client-side Salt
+    // slot is unused for password derivation on login.
+    expect(tokenBody.UserDecryptionOptions.MasterPasswordUnlock.Salt).toBe('odd-salt@example.com');
   });
 
   it('2026 SDK style: JSON body with nested masterPasswordAuthentication', async () => {

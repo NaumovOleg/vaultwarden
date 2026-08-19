@@ -29,6 +29,10 @@ export function orgJson(org: OrganizationItem, member: OrgUserItem): Record<stri
     key: org.key,
     status: member.status,
     type: member.type,
+    // Android's SyncResponseJson.Organization requires keyConnectorEnabled
+    // and permissions — missing fields fail the whole sync decode.
+    keyConnectorEnabled: false,
+    permissions: { manageResetPassword: false, managePolicies: false },
     usePolicies: true,
     useSso: false,
     useKeyConnector: false,
