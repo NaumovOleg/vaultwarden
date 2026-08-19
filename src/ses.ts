@@ -2,6 +2,7 @@ import { SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
 
 const client = new SESv2Client({ region: process.env.AWS_REGION ?? 'eu-west-1' });
 const source = process.env.SES_SOURCE ?? '';
+const configurationSet = process.env.SES_CONFIG_SET ?? '';
 
 export interface Mailer {
   send(to: string, subject: string, body: string): Promise<void>;
@@ -16,6 +17,7 @@ export const sesMailer: Mailer = {
       new SendEmailCommand({
         FromEmailAddress: source,
         Destination: { ToAddresses: [to] },
+        ConfigurationSetName: configurationSet || undefined,
         Content: {
           Simple: {
             Subject: { Data: subject, Charset: 'utf-8' },

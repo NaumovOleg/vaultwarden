@@ -60,6 +60,27 @@ export class VaultwardenStack extends cdk.Stack {
       sortKey: { name: 'sk', type: dynamodb.AttributeType.STRING },
     });
 
+    // Vault snapshots every 2 days on top of PITR. RETAIN: a backup outlives
+    // the stack (destroying it deletes the only copy of the vault outside PITR).
+    new cdk.aws_backup.BackupPlan(this, 'VaultBackupPlan', {
+      backupVault: new cdk.aws_backup.BackupVault(this, 'VaultBackupVault', {
+        backupVaultName: 'vaultwarden-backups',
+        removalPolicy: cdk.RemovalPolicy.RETAIN,
+      }),
+      backupPlanRules: [
+        new cdk.aws_backup.BackupPlanRule({
+          scheduleExpression: cdk.aws_events.Schedule.cron({
+            minute: '0',
+            hour: '2',
+            day: '*/2',
+          }),
+          deleteAfter: cdk.Duration.days(7),
+        }),
+      ],
+    }).addSelection('Selection', {
+      resources: [cdk.aws_backup.BackupResource.fromDynamoDbTable(this.table)],
+    });
+
     // Regenerable caches, not data — safe to destroy with the stack.
     const domain = this.node.tryGetContext('vaultwarden:domain') ?? 'https://localhost';
     const vaultOrigin = new URL(domain).hostname;
@@ -129,6 +150,11 @@ export class VaultwardenStack extends cdk.Stack {
     // deprecated); the SES sandbox still needs the recipient address verified
     // once (click the link Amazon emails you).
     const sesZoneId = this.node.tryGetContext('vaultwarden:hostedZoneId') as string | undefined;
+    let alarmTopic: cdk.aws_sns.Topic | undefined;
+    if (alertEmail) {
+      alarmTopic = new cdk.aws_sns.Topic(this, 'AlarmTopic');
+      alarmTopic.addSubscription(new cdk.aws_sns_subscriptions.EmailSubscription(alertEmail));
+    }
     if (sesZoneId) {
       const sesIdentity = new cdk.aws_ses.EmailIdentity(this, 'SesDomainIdentity', {
         identity: cdk.aws_ses.Identity.domain(vaultOrigin),
@@ -154,6 +180,33 @@ export class VaultwardenStack extends cdk.Stack {
           resources: ['*'],
         }),
       );
+
+      // SES bounce/complaint → EventBridge → SNS → email. Without a
+      // configuration set SES publishes no events; without these alerts a
+      // sender that trips the bounce ceiling gets throttled by Amazon silently.
+      const configSet = new cdk.aws_ses.ConfigurationSet(this, 'SesConfigSet', {
+        configurationSetName: 'vaultwarden-mail',
+      });
+      configSet.addEventDestination('BounceComplaint', {
+        destination: cdk.aws_ses.EventDestination.eventBus(
+          cdk.aws_events.EventBus.fromEventBusName(this, 'DefaultBus', 'default'),
+        ),
+        events: [
+          cdk.aws_ses.EmailSendingEvent.BOUNCE,
+          cdk.aws_ses.EmailSendingEvent.COMPLAINT,
+          cdk.aws_ses.EmailSendingEvent.REJECT,
+        ],
+      });
+      this.handler.addEnvironment('SES_CONFIG_SET', configSet.configurationSetName);
+      if (alarmTopic) {
+        new cdk.aws_events.Rule(this, 'SesBounceRule', {
+          eventPattern: {
+            source: ['aws.ses'],
+            detailType: ['Bounce', 'Complaint', 'Reject'],
+          },
+          targets: [new cdk.aws_events_targets.SnsTopic(alarmTopic)],
+        });
+      }
     }
 
     // Error alarms → SNS → email. Same conditional as the budget: no email
@@ -168,10 +221,7 @@ export class VaultwardenStack extends cdk.Stack {
       ),
     });
 
-    if (alertEmail) {
-      const alarmTopic = new cdk.aws_sns.Topic(this, 'AlarmTopic');
-      alarmTopic.addSubscription(new cdk.aws_sns_subscriptions.EmailSubscription(alertEmail));
-
+    if (alarmTopic) {
       new cdk.aws_cloudwatch.Alarm(this, 'LambdaErrorsAlarm', {
         metric: this.handler.metricErrors(),
         threshold: 1,

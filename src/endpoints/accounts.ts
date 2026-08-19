@@ -131,7 +131,11 @@ export async function verifyEmail(params: Record<string, string>, ctx: RouteCont
   if (!token || !userId) throw new BitwardenError(400, 'Invalid verification token.');
 
   const v = await ctx.store.getVerifyToken(token);
-  if (!v || v.expiresAt < Math.floor(Date.now() / 1000) || v.userId !== userId) {
+  // Two token flavors: change-email tokens carry userId; signup tokens are
+  // minted before the account exists, so the user is matched by email.
+  const owned =
+    v && (v.userId === userId || (!v.userId && v.email.toLowerCase() === (await ctx.store.getUserByUserId(userId))?.email?.toLowerCase()));
+  if (!v || v.expiresAt < Math.floor(Date.now() / 1000) || !owned) {
     throw new BitwardenError(400, 'Invalid verification token.');
   }
   const user = await ctx.store.getUserByUserId(userId);
@@ -152,8 +156,11 @@ export async function verifyEmail(params: Record<string, string>, ctx: RouteCont
 }
 
 function originUrl(ctx: RouteContext): string {
+  // DEFAULT_DOMAIN is the canonical public host; the Host header is rewritten
+  // by CloudFront to the API Gateway origin, so it must never win when set.
+  const canonical = process.env.DEFAULT_DOMAIN ?? '';
   const h = ctx.headers['host'] ?? ctx.headers['x-forwarded-host'] ?? '';
-  return h ? `https://${h}` : 'https://vaultwarden.free-bert.online';
+  return `https://${canonical || h || 'vaultwarden.free-bert.online'}`;
 }
 
 function jsonResponse(body: unknown) {

@@ -65,8 +65,11 @@ export function normalizeKdf(kdf: unknown, fallback: KdfConfig): KdfConfig {
 const VERIFY_TOKEN_TTL_SECONDS = 30 * 60;
 
 function originUrl(ctx: RouteContext): string {
+  // DEFAULT_DOMAIN is the canonical public host; the Host header is rewritten
+  // by CloudFront to the API Gateway origin, so it must never win when set.
+  const canonical = process.env.DEFAULT_DOMAIN ?? '';
   const h = ctx.headers['host'] ?? ctx.headers['x-forwarded-host'] ?? '';
-  return h ? `https://${h}` : 'https://vaultwarden.free-bert.online';
+  return `https://${canonical || h || 'vaultwarden.free-bert.online'}`;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -105,11 +108,16 @@ export async function sendVerificationEmail(params: Record<string, string>, ctx:
     item.userId = existing.id;
     await ctx.store.putVerifyToken(item);
     if (mailerAvailable(ctx)) {
-      await ctx.mailer.send(
-        email,
-        'Verify your email',
-        `Confirm your email: ${originUrl(ctx)}/verify-email.html?userId=${existing.id}&token=${token}`,
-      );
+      try {
+        await ctx.mailer.send(
+          email,
+          'Verify your email',
+          `Confirm your email: ${originUrl(ctx)}/verify-email.html?userId=${existing.id}&token=${token}`,
+        );
+      } catch (err) {
+        console.error('sendVerificationEmail: SES send failed', err);
+        return json(500, { error: 'Failed to send the verification email.' });
+      }
       return json(200, {});
     }
     return json(200, '');
@@ -119,11 +127,16 @@ export async function sendVerificationEmail(params: Record<string, string>, ctx:
   // Client branches on the body being a string: string → finish-signup with
   // the token, anything else → "check your email" screen.
   if (mailerAvailable(ctx)) {
-    await ctx.mailer.send(
-      email,
-      'Finish creating your account',
-      `Finish creating your account: ${originUrl(ctx)}/#/finish-signup?email=${encodeURIComponent(email)}&emailVerificationToken=${token}`,
-    );
+    try {
+      await ctx.mailer.send(
+        email,
+        'Finish creating your account',
+        `Finish creating your account: ${originUrl(ctx)}/#/finish-signup?email=${encodeURIComponent(email)}&token=${token}&emailVerificationToken=${token}&fromEmail=true`,
+      );
+    } catch (err) {
+      console.error('sendVerificationEmail: SES send failed', err);
+      return json(500, { error: 'Failed to send the verification email.' });
+    }
     return json(200, {});
   }
   return json(200, token);
