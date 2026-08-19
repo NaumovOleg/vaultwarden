@@ -117,11 +117,44 @@ export class VaultwardenStack extends cdk.Stack {
         VAULT_TABLE: this.table.tableName,
         ATTACHMENTS_BUCKET: this.attachmentsBucket.bucketName,
         ICONS_BUCKET: this.iconsBucket.bucketName,
+        SES_SOURCE: `no-reply@${vaultOrigin}`,
       },
     });
     this.table.grantReadWriteData(this.handler);
     this.attachmentsBucket.grantReadWrite(this.handler);
     this.iconsBucket.grantReadWrite(this.handler);
+
+    // SES: send recovery emails from the vault domain. DKIM records are
+    // published into the hosted zone manually (the CDK hostedZone path is
+    // deprecated); the SES sandbox still needs the recipient address verified
+    // once (click the link Amazon emails you).
+    const sesZoneId = this.node.tryGetContext('vaultwarden:hostedZoneId') as string | undefined;
+    if (sesZoneId) {
+      const sesIdentity = new cdk.aws_ses.EmailIdentity(this, 'SesDomainIdentity', {
+        identity: cdk.aws_ses.Identity.domain(vaultOrigin),
+        dkimSigning: true,
+      });
+      for (const entry of [
+        [1, sesIdentity.dkimDnsTokenName1, sesIdentity.dkimDnsTokenValue1],
+        [2, sesIdentity.dkimDnsTokenName2, sesIdentity.dkimDnsTokenValue2],
+        [3, sesIdentity.dkimDnsTokenName3, sesIdentity.dkimDnsTokenValue3],
+      ] as const) {
+        const [record, name, value] = entry;
+        new cdk.aws_route53.CfnRecordSet(this, `SesDkimRecord${record}`, {
+          hostedZoneId: sesZoneId,
+          name,
+          type: 'CNAME',
+          ttl: '1800',
+          resourceRecords: [value],
+        });
+      }
+      this.handler.addToRolePolicy(
+        new cdk.aws_iam.PolicyStatement({
+          actions: ['ses:SendEmail', 'ses:SendRawEmail'],
+          resources: ['*'],
+        }),
+      );
+    }
 
     // Error alarms → SNS → email. Same conditional as the budget: no email
     // configured means no subscription (a CfnSubscription with an empty

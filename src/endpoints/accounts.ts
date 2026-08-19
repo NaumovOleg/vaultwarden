@@ -5,12 +5,160 @@ import { folderJson } from './folders';
 import { sendJson } from './sends';
 import { orgJson } from './organizations';
 import { collectionJson } from './collections';
-import { newUuid, hashPassword } from '../crypto';
+import { newUuid, newToken, hashPassword } from '../crypto';
 import { verifyClientHash } from '../auth';
 import { BitwardenError } from '../errors';
 import { jsonValue, normalizeKdf } from './identity';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' };
+
+// POST /api/accounts/recover/reset — full account reset guarded by the emailed
+// recovery code: new master password + new key pair, 2FA off, every device
+// logged out, and the vault wiped (its data was encrypted with the old master
+// key and is unrecoverable by design).
+export async function recoverReset(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const body = (ctx.bodyJson ?? {}) as Record<string, unknown>;
+  const email = (jsonValue(body, 'email') ?? '').toString().trim().toLowerCase();
+  // jsonValue JSON-parses numeric-looking strings, so '37982902' would become
+  // a number; coerce back to string before comparing.
+  const code = String(jsonValue(body, 'code') ?? '');
+  if (code === '') throw new BitwardenError(400, 'Recovery code is required.');
+  const user = email ? await ctx.store.getUserByEmail(email) : null;
+  const recover = user ? await ctx.store.getRecoverCode(user.id) : null;
+  if (!user || !recover || recover.code !== code) throw new BitwardenError(400, 'Invalid recovery code.');
+
+  const clientHash = jsonValue(body, 'newMasterPasswordHash');
+  if (typeof clientHash !== 'string' || clientHash === '') throw new BitwardenError(400, 'Invalid password.');
+  const keys = (jsonValue(body, 'keys') ?? {}) as Record<string, unknown>;
+  const kdf = normalizeKdf(jsonValue(body, 'kdf'), {
+    type: user.kdfType,
+    iterations: user.kdfIterations,
+    memory: user.kdfMemory,
+    parallelism: user.kdfParallelism,
+  });
+
+  await ctx.store.deleteRecoverCode(user.id);
+  await ctx.store.deleteEmail2faCode(user.id);
+  for (const h of await ctx.store.listRecoveryHashes(user.id)) {
+    await ctx.store.deleteRecoveryHash(user.id, h);
+  }
+  await ctx.store.clearRememberedDevices(user.id);
+  for (const cipher of await ctx.store.listCiphers(user.id)) {
+    await ctx.store.deleteCipher(user.id, cipher.id);
+  }
+  for (const folder of await ctx.store.listFolders(user.id)) {
+    await ctx.store.deleteFolder(user.id, folder.id);
+  }
+  for (const send of await ctx.store.listSends(user.id)) {
+    await ctx.store.deleteSend(user.id, send.id);
+  }
+
+  const updated: UserItem = {
+    ...user,
+    passwordHash: hashPassword(Buffer.from(clientHash, 'base64'), Buffer.from(user.salt, 'base64'), kdf.iterations).toString('base64'),
+    kdfType: kdf.type,
+    kdfIterations: kdf.iterations,
+    kdfMemory: kdf.memory,
+    kdfParallelism: kdf.parallelism,
+    akey: typeof jsonValue(body, 'key') === 'string' ? (jsonValue(body, 'key') as string) : '',
+    privateKey: typeof keys.privateKey === 'string' ? keys.privateKey : null,
+    publicKey: typeof keys.publicKey === 'string' ? keys.publicKey : null,
+    twoFactorEnabled: false,
+    totpSecret: null,
+    totpPendingSecret: null,
+    email2faEnabled: false,
+    email2faAddress: null,
+    securityStamp: newUuid(),
+    revisionDate: new Date().toISOString(),
+    revisionDateMs: Date.now(),
+  };
+  await ctx.store.putUser(updated);
+  return { statusCode: 200, headers: JSON_HEADERS, body: '{}' };
+}
+
+// POST /api/accounts/email — change the account email. Requires the current
+// master password; the new address is confirmed by emailing it a link before
+// anything changes. Requests to an address that's already taken are rejected
+// upfront (same rule as registration).
+export async function changeEmail(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const user = ctx.user!;
+  const body = (ctx.bodyJson ?? {}) as Record<string, unknown>;
+  requirePassword(body, user);
+
+  const email = String(body.email ?? '').trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    throw new BitwardenError(400, 'Invalid email address.');
+  }
+  if (email === user.email) {
+    throw new BitwardenError(400, 'The new email is the same as the current one.');
+  }
+  if (await ctx.store.getUserByEmail(email)) {
+    throw new BitwardenError(400, 'An account with this email already exists.');
+  }
+
+  const token = newToken();
+  await ctx.store.putVerifyToken({
+    pk: `VERIFY#${token}`,
+    sk: 'TOKEN',
+    email,
+    name: null,
+    expiresAt: Math.floor(Date.now() / 1000) + 30 * 60,
+    userId: user.id,
+    pendingEmail: email,
+  });
+  if (process.env.SES_SOURCE !== undefined && process.env.SES_SOURCE !== '') {
+    await ctx.mailer.send(
+      email,
+      'Confirm your new email',
+      `Confirm your new email: ${originUrl(ctx)}/verify-email.html?userId=${encodeURIComponent(user.id)}&token=${token}`,
+    );
+    return { statusCode: 200, headers: JSON_HEADERS, body: '{}' };
+  }
+  // No mailer configured: apply the change immediately (dev/self-served flow).
+  const updated: UserItem = { ...user, email, emailVerified: true, revisionDate: new Date().toISOString(), revisionDateMs: Date.now() };
+  await ctx.store.putUser(updated);
+  await ctx.store.deleteVerifyToken(token);
+  return { statusCode: 200, headers: JSON_HEADERS, body: '{}' };
+}
+
+// POST /api/accounts/verify-email — public confirmation endpoint hit from the
+// emailed link. Applies a pending email change, or simply marks the account
+// verified for a resend flow. Single-use token.
+export async function verifyEmail(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const body = (ctx.bodyJson ?? {}) as Record<string, unknown>;
+  const token = String(jsonValue(body, 'token') ?? '').trim();
+  const userId = String(jsonValue(body, 'userId') ?? '').trim();
+  if (!token || !userId) throw new BitwardenError(400, 'Invalid verification token.');
+
+  const v = await ctx.store.getVerifyToken(token);
+  if (!v || v.expiresAt < Math.floor(Date.now() / 1000) || v.userId !== userId) {
+    throw new BitwardenError(400, 'Invalid verification token.');
+  }
+  const user = await ctx.store.getUserByUserId(userId);
+  if (!user) throw new BitwardenError(400, 'Invalid verification token.');
+
+  const updated: UserItem = { ...user, emailVerified: true };
+  if (v.pendingEmail && v.pendingEmail.toLowerCase() !== user.email) {
+    if (await ctx.store.getUserByEmail(v.pendingEmail)) {
+      throw new BitwardenError(400, 'An account with this email already exists.');
+    }
+    updated.email = v.pendingEmail;
+    updated.revisionDate = new Date().toISOString();
+    updated.revisionDateMs = Date.now();
+  }
+  await ctx.store.putUser(updated);
+  await ctx.store.deleteVerifyToken(token);
+  return jsonResponse({});
+}
+
+function originUrl(ctx: RouteContext): string {
+  const h = ctx.headers['host'] ?? ctx.headers['x-forwarded-host'] ?? '';
+  return h ? `https://${h}` : 'https://vaultwarden.free-bert.online';
+}
+
+function jsonResponse(body: unknown) {
+  return { statusCode: 200, headers: JSON_HEADERS, body: JSON.stringify(body) };
+}
 
 async function userOrgsJson(ctx: RouteContext) {
   const memberships = await ctx.store.listOrganizationsForUser(ctx.user!.id);
@@ -260,6 +408,31 @@ export async function changePassword(params: Record<string, string>, ctx: RouteC
   };
   await ctx.store.putUser(updated);
   return jwtJson(200, {});
+}
+
+// GET /api/accounts/hint?email= — master password hint (vaultwarden
+// password_hint, no auth). Empty hint answers {"masterPasswordHint": null}.
+export async function passwordHint(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const email = (typeof params.email === 'string' ? params.email : ctx.query.email ?? '')
+    .trim()
+    .toLowerCase();
+  if (email === '') throw new BitwardenError(400, 'Email is required.');
+  const user = await ctx.store.getUserByEmail(email);
+  return json(200, { masterPasswordHint: user?.masterPasswordHint ?? null });
+}
+
+// POST /api/accounts/password-hint — set/replace hint (auth, vaultwarden
+// set_password_hint).
+export async function setPasswordHint(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const user = ctx.user!;
+  const hint = jsonValue(ctx.bodyJson, 'masterPasswordHint');
+  await ctx.store.putUser({
+    ...user,
+    masterPasswordHint: typeof hint === 'string' && hint !== '' ? hint : null,
+    revisionDate: new Date().toISOString(),
+    revisionDateMs: Date.now(),
+  });
+  return json(200, {});
 }
 
 // POST /api/accounts/kdf — verify, store kdf, rotate stamp.

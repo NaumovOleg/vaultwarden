@@ -6,7 +6,7 @@
     "vaultwarden:hostedZoneId": "Z030578515GZY7DG3D0QY",
     "vaultwarden:staticBucketName": "vaultwarden-static-602101700579",
     "vaultwarden:alertEmail": "keeperoleg26@gmail.com",
-    "vaultwarden:signupsAllowed": "false",
+    "vaultwarden:signupsAllowed": "true",
     "@aws-cdk/core:newStyleStackSynthesis": true
   }
 }

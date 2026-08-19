@@ -1,5 +1,6 @@
 import type { SessionItem, Store, UserItem } from './store';
 import type { ObjectStore } from './objects';
+import type { Mailer } from './ses';
 
 export interface Route {
   method: string;
@@ -12,6 +13,7 @@ export interface RouteContext {
   store: Store;
   objects: ObjectStore;
   icons: ObjectStore;
+  mailer: Mailer;
   bodyRaw: string;
   bodyBytes: Buffer;
   bodyForm: URLSearchParams;

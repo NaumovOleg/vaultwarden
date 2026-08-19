@@ -2,7 +2,7 @@ import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 import { createHandler } from '../src/handler';
 import type { Route } from '../src/router';
 import { MemoryStore } from '../src/store';
-import { profile, revisionDate, keys, sync, changePassword, changeKdf, rotateSecurityStamp, verifyPassword, deleteAccount, updateProfile } from '../src/endpoints/accounts';
+import { profile, revisionDate, keys, sync, changePassword, changeKdf, rotateSecurityStamp, verifyPassword, deleteAccount, updateProfile, passwordHint, setPasswordHint } from '../src/endpoints/accounts';
 import { register, sendVerificationEmail, token } from '../src/endpoints/identity';
 
 const PASSWORD = Buffer.from('client-hash').toString('base64');
@@ -22,6 +22,8 @@ const routes: Route[] = [
   { method: 'POST', pattern: '/api/accounts/verify-password', handler: verifyPassword, auth: true },
   { method: 'POST', pattern: '/api/accounts/delete', handler: deleteAccount, auth: true },
   { method: 'PUT', pattern: '/api/accounts/profile', handler: updateProfile, auth: true },
+  { method: 'GET', pattern: '/api/accounts/hint', handler: passwordHint },
+  { method: 'POST', pattern: '/api/accounts/password-hint', handler: setPasswordHint, auth: true },
 ];
 
 function makeEnv() {
@@ -518,5 +520,27 @@ describe('account management', () => {
     );
     expect(reg.statusCode).toBe(200);
     expect((await env.handler(ev('GET', '/api/accounts/profile', '', at))).statusCode).toBe(401);
+  });
+});
+describe('password hint', () => {
+  const oldSignups = process.env.SIGNUPS_ALLOWED;
+  beforeAll(() => { process.env.SIGNUPS_ALLOWED = 'true'; });
+  afterAll(() => { process.env.SIGNUPS_ALLOWED = oldSignups; });
+
+  it('GET hint is public, returns stored hint; POST sets it; unknown email → null', async () => {
+    const env = makeEnv();
+    const at = await registerAndLogin(env, 'hint@example.com', { masterPasswordHint: 'my-dog' });
+
+    const get = await env.handler(ev('GET', '/api/accounts/hint', '', undefined, 'email=hint%40example.com'));
+    expect(get.statusCode).toBe(200);
+    expect(JSON.parse(get.body as string)).toEqual({ masterPasswordHint: 'my-dog' });
+
+    const unknown = await env.handler(ev('GET', '/api/accounts/hint', '', undefined, 'email=nobody%40example.com'));
+    expect(JSON.parse(unknown.body as string)).toEqual({ masterPasswordHint: null });
+
+    const set = await env.handler(ev('POST', '/api/accounts/password-hint', JSON.stringify({ masterPasswordHint: 'new-hint' }), at));
+    expect(set.statusCode).toBe(200);
+    const after = await env.handler(ev('GET', '/api/accounts/hint', '', undefined, 'email=hint%40example.com'));
+    expect(JSON.parse(after.body as string)).toEqual({ masterPasswordHint: 'new-hint' });
   });
 });

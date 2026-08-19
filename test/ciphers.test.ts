@@ -25,6 +25,10 @@ const routes: Route[] = [
   { method: 'POST', pattern: '/api/ciphers/:cipherId/soft-delete', handler: (p, c) => cipherSoftDelete(p, c), auth: true },
   { method: 'PUT', pattern: '/api/ciphers/:cipherId/restore', handler: (p, c) => cipherRestore(p, c), auth: true },
   { method: 'POST', pattern: '/api/ciphers/:cipherId/restore', handler: (p, c) => cipherRestore(p, c), auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/:cipherId/archive', handler: (p, c) => cipherArchive(p, c), auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/:cipherId/unarchive', handler: (p, c) => cipherUnarchive(p, c), auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/archive', handler: (p, c) => cipherBulkArchive(p, c), auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/unarchive', handler: (p, c) => cipherBulkUnarchive(p, c), auth: true },
   { method: 'POST', pattern: '/api/ciphers/move', handler: (p, c) => cipherMove(p, c), auth: true },
   { method: 'POST', pattern: '/api/ciphers/purge', handler: (p, c) => cipherPurge(p, c), auth: true },
   { method: 'POST', pattern: '/api/ciphers/delete', handler: (p, c) => cipherBulkDelete(p, c), auth: true },
@@ -40,6 +44,10 @@ import {
   cipherDelete,
   cipherSoftDelete,
   cipherRestore,
+  cipherArchive,
+  cipherUnarchive,
+  cipherBulkArchive,
+  cipherBulkUnarchive,
   cipherMove,
   cipherPurge,
   cipherBulkDelete,
@@ -254,6 +262,39 @@ describe('cipher CRUD', () => {
     expect(hard.statusCode).toBe(200);
     const uid = (await env.store.getUserByEmail('trash@example.com'))!.id;
     expect(await env.store.getCipher(uid, cid)).toBeNull();
+  });
+
+  it('archive/unarchive: archivedDate set/null, stays in list and sync', async () => {
+    const env = makeEnv();
+    const at = await seed(env, 'archive@example.com');
+    const c1 = JSON.parse((await env.handler(ev('POST', '/api/ciphers', JSON.stringify(LOGIN_CIPHER), at))).body as string).id;
+    const c2 = JSON.parse((await env.handler(ev('POST', '/api/ciphers', JSON.stringify({ ...LOGIN_CIPHER, name: 'two' }), at))).body as string).id;
+    const userId = (await env.store.getUserByEmail('archive@example.com'))!.id;
+
+    const archived = JSON.parse((await env.handler(ev('PUT', `/api/ciphers/${c1}/archive`, '', at))).body as string);
+    expect(archived.statusCode ?? 200).toBe(200);
+    expect(archived.archivedDate).not.toBeNull();
+    expect(await env.store.getCipher(userId, c1)).toMatchObject({ archivedDate: expect.any(String) });
+
+    const unarchived = JSON.parse((await env.handler(ev('PUT', `/api/ciphers/${c1}/unarchive`, '', at))).body as string);
+    expect(unarchived.statusCode ?? 200).toBe(200);
+    expect(unarchived.archivedDate).toBeNull();
+
+    const bulk = await env.handler(ev('PUT', '/api/ciphers/archive', JSON.stringify({ ids: [c1, c2] }), at));
+    expect(bulk.statusCode).toBe(200);
+    const bulkBody = JSON.parse(bulk.body as string);
+    expect(bulkBody.object).toBe('list');
+    expect(bulkBody.continuationToken).toBeNull();
+    expect(bulkBody.data.map((c: { id: string }) => c.id).sort()).toEqual([c1, c2].sort());
+    expect(bulkBody.data.every((c: { archivedDate: string | null }) => c.archivedDate !== null)).toBe(true);
+
+    const list = JSON.parse((await env.handler(ev('GET', '/api/ciphers', '', at))).body as string);
+    expect(list.data).toHaveLength(2);
+    expect(list.data.every((c: { archivedDate: string | null }) => c.archivedDate !== null)).toBe(true);
+
+    const syncBody = JSON.parse((await env.handler(ev('GET', '/api/sync', '', at))).body as string);
+    expect(syncBody.ciphers).toHaveLength(2);
+    expect(syncBody.ciphers.every((c: { archivedDate: string | null }) => c.archivedDate !== null)).toBe(true);
   });
 
 it('move sets folderId; bulk delete removes rows permanently', async () => {

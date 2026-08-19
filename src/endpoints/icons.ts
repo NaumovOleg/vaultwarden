@@ -19,10 +19,11 @@ function normalizeHost(raw: string): string | null {
 }
 
 function iconResponse(bytes: Buffer): APIGatewayProxyResult {
+  const png = bytes.length > 4 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
   return {
     statusCode: 200,
     headers: {
-      'Content-Type': 'image/png',
+      'Content-Type': png ? 'image/png' : 'image/x-icon',
       'Cache-Control': `public, max-age=${CACHE_MAX_AGE}`,
     },
     body: bytes.toString('base64'),
@@ -47,18 +48,21 @@ export async function iconHandler(params: Record<string, string>, ctx: RouteCont
   }
 
   let bytes: Buffer | null = null;
-  try {
-    const res = await fetch(`https://icons.bitwarden.net/${host}/icon.png`, {
-      signal: AbortSignal.timeout(10_000),
-      redirect: 'follow',
-    });
-    if (res.ok && res.headers.get('content-type')?.includes('image')) {
-      const buf = Buffer.from(await res.arrayBuffer());
-      if (buf.length > 0 && buf.length < 256_000) bytes = buf;
+  // ponytail: single provider (duckduckgo ip3); ip2 fallback for sites whose
+  // 32px favicon is missing; a google/bing ladder only if DDG dies long-term.
+  for (const u of [`https://icons.duckduckgo.com/ip3/${host}.ico`, `https://icons.duckduckgo.com/ip2/${host}.ico`]) {
+    try {
+      const res = await fetch(u, { signal: AbortSignal.timeout(10_000), redirect: 'follow' });
+      if (res.ok && res.headers.get('content-type')?.includes('image')) {
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length > 0 && buf.length < 256_000) {
+          bytes = buf;
+          break;
+        }
+      }
+    } catch {
+      // continue to next upstream
     }
-  } catch {
-    // ponytail: single upstream, no retry; a multi-provider failover ladder
-    // (duckduckgo/google) only if icons.bitwarden.net is ever down long-term.
   }
 
   await ctx.icons.putObject(ICON_KEY(host), bytes ?? Buffer.alloc(0));

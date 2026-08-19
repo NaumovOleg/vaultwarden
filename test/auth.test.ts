@@ -266,8 +266,9 @@ describe('connect/token protocol', () => {
     await registerUser(handler, 'ratelimited@example.com');
     const wrong = Buffer.from('nope').toString('base64');
 
-    // 9 failures (under the 10/min threshold) — all plain 400s.
-    for (let i = 0; i < 9; i++) {
+    // Per-account lock kicks in after 5 failures against a known email.
+    // 4 failures are under the threshold — all plain 400s.
+    for (let i = 0; i < 4; i++) {
       const r = await handler(loginBody('ratelimited@example.com', { password: wrong }));
       expect(r.statusCode).toBe(400);
     }
@@ -277,12 +278,13 @@ describe('connect/token protocol', () => {
     expect(ok.statusCode).toBe(200);
     expect(JSON.parse(ok.body as string).access_token).toBeDefined();
 
-    // Fresh counter: 10 failures then the 11th attempt is blocked 429.
-    for (let i = 0; i < 10; i++) {
+    // Fresh counter: 5 failures then the 6th attempt (even with the correct
+    // password) is blocked 429 while the lock window is open.
+    for (let i = 0; i < 5; i++) {
       const r = await handler(loginBody('ratelimited@example.com', { password: wrong }));
       expect(r.statusCode).toBe(400);
     }
-    const blocked = await handler(loginBody('ratelimited@example.com', { password: wrong }));
+    const blocked = await handler(loginBody('ratelimited@example.com'));
     expect(blocked.statusCode).toBe(429);
     expect(JSON.parse(blocked.body as string).Message).toBe(
       'Too many login attempts. Try again later.',

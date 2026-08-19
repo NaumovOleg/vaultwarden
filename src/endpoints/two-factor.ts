@@ -171,9 +171,9 @@ export async function getEmailSetup(params: Record<string, string>, ctx: RouteCo
   });
 }
 
-// POST /api/two-factor/send-email — setup code to the given address; response
-// echoes the masked address (no email transport: code is returned in the body
-// for the CLI/e2e flow and logged; ponytail: swap for SES when shipping).
+// POST /api/two-factor/send-email — setup code to the given address. With
+// SES the code goes by mail; without it the code is returned in the body for
+// the CLI/e2e flow (ponytail dev fallback).
 export async function sendEmailSetup(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
   const user = ctx.user!;
   const body = ctx.bodyJson as Record<string, unknown>;
@@ -183,6 +183,10 @@ export async function sendEmailSetup(params: Record<string, string>, ctx: RouteC
   }
   const code = makeEmailCode();
   await ctx.store.putEmail2faCode(user.id, code, Math.floor(Date.now() / 1000) + EMAIL_CODE_TTL_SECONDS);
+  if (process.env.SES_SOURCE !== undefined && process.env.SES_SOURCE !== '') {
+    await ctx.mailer.send(email, 'Your verification code', `Your vaultwarden email 2FA code is ${code}.`);
+    return json(200, { email: maskEmail(email) });
+  }
   console.log(`[2fa] email code for ${user.id}: ${code}`);
   return json(200, { email: maskEmail(email), code });
 }
@@ -198,6 +202,15 @@ export async function sendEmailLogin(params: Record<string, string>, ctx: RouteC
   }
   const code = makeEmailCode();
   await ctx.store.putEmail2faCode(user.id, code, Math.floor(Date.now() / 1000) + EMAIL_CODE_TTL_SECONDS);
+  if (process.env.SES_SOURCE !== undefined && process.env.SES_SOURCE !== '') {
+    // email2faAddress stores a masked display address only; the login form
+    // resends the full address in the body.
+    if (/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      await ctx.mailer.send(email, 'Your verification code', `Your vaultwarden email 2FA code is ${code}.`);
+      return json(200, {});
+    }
+    throw new BitwardenError(400, 'Invalid email.');
+  }
   console.log(`[2fa] email login code for ${user.id}: ${code}`);
   return json(200, {});
 }
@@ -256,8 +269,14 @@ export function twoFactorChallenge(user: UserItem, token: string): Record<string
 }
 
 // Validate a 2FA code for provider type. 0 = authenticator (incl. recovery
-// codes), 1 = email code (plan 02). Unknown/disabled provider → false.
+// codes), 1 = email code (plan 02). Unknown/disabled provider → false. An
+// emailed recover code (sendRecoveryCode) satisfies any active provider.
 export async function verifyTwoFactorCode(user: UserItem, provider: number, code: string, ctx: RouteContext): Promise<boolean> {
+  const recover = await ctx.store.getRecoverCode(user.id);
+  if (recover && recover.code === code) {
+    await ctx.store.deleteRecoverCode(user.id);
+    return true;
+  }
   if (provider === 0 && user.totpSecret) {
     if (totpVerify(user.totpSecret, code)) return true;
     const hashes = await ctx.store.listRecoveryHashes(user.id);

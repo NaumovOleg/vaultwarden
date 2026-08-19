@@ -50,6 +50,7 @@ async function cipherJson(item: CipherItem, object: 'cipher' | 'cipherDetails', 
     creationDate: item.creationDate,
     revisionDate: item.revisionDate,
     deletedDate: item.deletedDate,
+    archivedDate: item.archivedDate ?? null,
     reprompt: item.reprompt,
     organizationId: item.organizationId,
     key: item.key,
@@ -133,6 +134,7 @@ function normalizeCreate(body: Record<string, any>): Omit<CipherItem, 'pk' | 'sk
     creationDate: '',
     revisionDate: '',
     deletedDate: null,
+    archivedDate: null,
     key: null,
     login:
       body.login && typeof body.login === 'object'
@@ -292,6 +294,65 @@ export async function cipherRestore(params: Record<string, string>, ctx: RouteCo
     deletedDate: null,
     revisionDate: new Date().toISOString(),
   });
+  return json(200, {});
+}
+
+// PUT /api/ciphers/{id}/archive and /api/ciphers/{id}/unarchive — the
+// response body is the updated cipher (vaultwarden archive_cipher_put).
+export async function cipherArchive(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const { item, canWrite } = await resolveCipher(ctx, params.cipherId);
+  if (!canWrite) throw new BitwardenError(403, 'Insufficient permissions to archive this cipher.');
+  return setArchived(ctx, item, new Date().toISOString());
+}
+
+export async function cipherUnarchive(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const { item, canWrite } = await resolveCipher(ctx, params.cipherId);
+  if (!canWrite) throw new BitwardenError(403, 'Insufficient permissions to unarchive this cipher.');
+  return setArchived(ctx, item, null);
+}
+
+async function setArchived(ctx: RouteContext, item: CipherItem, archivedDate: string | null): Promise<unknown> {
+  const updated = { ...item, archivedDate, revisionDate: new Date().toISOString() };
+  await ctx.store.putCipher(updated);
+  return json(200, await cipherJson(updated, 'cipherDetails', ctx.objects));
+}
+
+// PUT /api/ciphers/archive and /api/ciphers/unarchive — bulk {ids}. Response
+// mirrors vaultwarden: {"data": [cipherDetails...], "object": "list",
+// "continuationToken": null}.
+async function bulkSetArchived(ctx: RouteContext, archivedDate: string | null): Promise<unknown> {
+  const now = new Date().toISOString();
+  const ids: unknown[] = ctx.bodyJson.ids ?? [];
+  const data: Record<string, unknown>[] = [];
+  for (const id of ids) {
+    if (typeof id !== 'string') continue;
+    const { item, canWrite } = await resolveCipher(ctx, id);
+    if (!canWrite) continue;
+    const updated = { ...item, archivedDate, revisionDate: now };
+    await ctx.store.putCipher(updated);
+    data.push(await cipherJson(updated, 'cipherDetails', ctx.objects));
+  }
+  return json(200, { data, object: 'list', continuationToken: null });
+}
+
+export async function cipherBulkArchive(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  return bulkSetArchived(ctx, new Date().toISOString());
+}
+
+export async function cipherBulkUnarchive(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  return bulkSetArchived(ctx, null);
+}
+
+// PUT|POST /api/ciphers/restore — bulk un-trash {ids} (vaultwarden
+// restore_multiple_ciphers). Response is {} per Bitwarden spec.
+export async function cipherBulkRestore(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const ids: unknown[] = ctx.bodyJson.ids ?? [];
+  for (const id of ids) {
+    if (typeof id !== 'string') continue;
+    const { item, canWrite } = await resolveCipher(ctx, id);
+    if (!canWrite) continue;
+    await ctx.store.putCipher({ ...item, deletedDate: null, revisionDate: new Date().toISOString() });
+  }
   return json(200, {});
 }
 

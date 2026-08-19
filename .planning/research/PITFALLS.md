@@ -459,3 +459,24 @@ Rust `bitwarden-api-api` (serde) и jslib терпят null в любом Option
 - prelogin: VW всегда `salt: null` (у нас salt юзера) — клиент 2026
   использует его для masterPasswordAuthenticationHash; работает, но
   расходится с эталоном.
+
+## 5. Recovery (SES) — проверенные грабли 2026-08-19
+
+- Stretch-схема (sdk-internal, актуальная): masterKey =
+  PBKDF2-SHA256(pw, utf8(prelogin.salt.lower), iterations); enc/mac =
+  HKDF-Expand(prk=masterKey, info="enc"/"mac") — WebCrypto HKDF НЕЛЬЗЯ
+  (делает Extract), нужен ручной expand: HMAC-SHA256(prk, info||0x01).
+- clientHash (ServerAuthorization) = PBKDF2(secret=masterKey, salt=pw,
+  iterations=1) → b64; сервер хранит PBKDF2(clientHash, b64(user.salt),
+  iters).
+- userKey = 64 байта (32 enc || 32 mac); akey = "2.iv|ct|mac" со
+  СТАНДАРТНЫМ base64 (с '='); privateKey зашифрован под юзер-ключ
+  (enc-подключ для AES, mac-подключ для HMAC), RSA-OAEP-2048 PKCS8/SPKI.
+- jsonValue() JSON-парсит строки → числовой код '37982902' становится
+  number → typeof string-проверки ломаются. В recoverReset (и любых
+  будущих код-полях) — String(jsonValue(...) ?? '').
+- SES sandbox: отправитель no-reply@домен → VerifiedForSendingStatus
+  false пока DKIM PENDING (72ч максимум); получатель keeperoleg26@gmail.com
+  требует email-identity (письмо от AWS с кликом). MessageRejected при
+  обоих условиях — логировать SES-ошибку целиком (в т.ч. 'check the region
+  EU-WEST-1' — клиент SES создаётся с region из AWS_REGION).

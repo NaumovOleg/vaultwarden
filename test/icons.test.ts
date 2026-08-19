@@ -65,6 +65,24 @@ describe('icons service', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('upstream is duckduckgo ip3, second attempt ip2 on miss', async () => {
+    let n = 0;
+    (globalThis as any).fetch = jest.fn(async () => {
+      n += 1;
+      if (n === 1) return { ok: false, status: 404, headers: { get: () => 'image/x-icon' }, arrayBuffer: async () => new Uint8Array(0).buffer };
+      return { ok: true, status: 200, headers: { get: () => 'image/x-icon' }, arrayBuffer: async () => new Uint8Array([0, 0, 1, 0, 1, 2, 3]).buffer };
+    });
+    const { handler } = makeHandler();
+    const r = await handler(event('/icons/duck.example.com/icon.png'));
+    const fetchMock = (globalThis as any).fetch as jest.Mock;
+    const urls = fetchMock.mock.calls.map((c) => c[0]);
+    expect(urls[0]).toBe('https://icons.duckduckgo.com/ip3/duck.example.com.ico');
+    expect(urls[1]).toBe('https://icons.duckduckgo.com/ip2/duck.example.com.ico');
+    expect(r.statusCode).toBe(200);
+    expect((r.headers as Record<string, string>)['Content-Type']).toBe('image/x-icon');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it('upstream failure → 404 + negative marker cached, no refetch', async () => {
     mockFetch(500);
     const { handler, icons } = makeHandler();
@@ -73,7 +91,7 @@ describe('icons service', () => {
     expect(icons.get('icons/down.example.com.png')).toEqual(Buffer.alloc(0));
     const fetchMock = (globalThis as any).fetch as jest.Mock;
     await handler(event('/icons/down.example.com/icon.png'));
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('normalizes scheme and strips path', async () => {

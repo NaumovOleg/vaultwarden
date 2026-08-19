@@ -39,6 +39,9 @@ export interface UserItem {
   revisionDate: string; // ISO
   revisionDateMs: number; // epoch ms (pitfall 2.2)
   createdAt: string;
+  // Missing → treated as verified (pre-verification accounts, and users
+  // created before email verification existed, keep logging in).
+  emailVerified?: boolean;
 }
 
 export interface DeviceItem {
@@ -100,6 +103,10 @@ export interface VerifyTokenItem {
   email: string;
   name: string | null;
   expiresAt: number;
+  // Present on email-change/verify tokens: the account the token belongs to,
+  // and (for a change) the address the user is switching to.
+  userId?: string;
+  pendingEmail?: string;
 }
 
 export interface RateItem {
@@ -142,6 +149,7 @@ export interface CipherItem {
   creationDate: string;
   revisionDate: string;
   deletedDate: string | null;
+  archivedDate: string | null;
   key: string | null;
   login: LoginData | null;
   secureNote: { type: number } | null;
@@ -284,6 +292,9 @@ export interface Store {
   putEmail2faCode(userId: string, code: string, expiresAt: number): Promise<void>;
   getEmail2faCode(userId: string): Promise<string | null>;
   deleteEmail2faCode(userId: string): Promise<void>;
+  putRecoverCode(userId: string, code: string, expiresAt: number): Promise<void>;
+  getRecoverCode(userId: string): Promise<{ code: string; expiresAt: number } | null>;
+  deleteRecoverCode(userId: string): Promise<void>;
   getRate(ip: string): Promise<RateItem | null>;
   putRate(item: RateItem): Promise<void>;
   incrementRate(ip: string, ttlSeconds: number): Promise<void>;
@@ -618,6 +629,30 @@ export class DynamoStore implements Store {
     await this.db.send(new DeleteCommand({
       TableName: this.table,
       Key: { pk: `TFA#${userId}`, sk: `EMAILCODE#${userId}` },
+    }));
+  }
+
+  async putRecoverCode(userId: string, code: string, expiresAt: number): Promise<void> {
+    await this.db.send(new PutCommand({
+      TableName: this.table,
+      Item: { pk: `TFA#${userId}`, sk: `RECOVERCODE#${userId}`, code, expiresAt },
+    }));
+  }
+
+  async getRecoverCode(userId: string): Promise<{ code: string; expiresAt: number } | null> {
+    const res = await this.db.send(new GetCommand({
+      TableName: this.table,
+      Key: { pk: `TFA#${userId}`, sk: `RECOVERCODE#${userId}` },
+    }));
+    const item = res.Item as { code?: string; expiresAt?: number } | undefined;
+    if (!item?.code || (item.expiresAt ?? 0) < Math.floor(Date.now() / 1000)) return null;
+    return { code: item.code, expiresAt: item.expiresAt! };
+  }
+
+  async deleteRecoverCode(userId: string): Promise<void> {
+    await this.db.send(new DeleteCommand({
+      TableName: this.table,
+      Key: { pk: `TFA#${userId}`, sk: `RECOVERCODE#${userId}` },
     }));
   }
 
@@ -1066,6 +1101,13 @@ export class MemoryStore implements Store {
   }
 
   async putUser(user: UserItem): Promise<void> {
+    // A changed email must move the by-email index entry (the old address is
+    // free to be reused afterwards).
+    for (const [email, existing] of this.usersByEmail) {
+      if (existing.id === user.id && email !== user.email.toLowerCase()) {
+        this.usersByEmail.delete(email);
+      }
+    }
     this.users.set(user.id, user);
     this.usersByEmail.set(user.email.toLowerCase(), user);
   }
@@ -1201,6 +1243,22 @@ export class MemoryStore implements Store {
 
   async deleteEmail2faCode(userId: string): Promise<void> {
     this.twoFactor.delete(`TFA#${userId}#EMAILCODE`);
+  }
+
+  async putRecoverCode(userId: string, code: string, expiresAt: number): Promise<void> {
+    this.twoFactor.set(`TFA#${userId}#RECOVERCODE`, { code, expiresAt });
+  }
+
+  async getRecoverCode(userId: string): Promise<{ code: string; expiresAt: number } | null> {
+    const item = this.twoFactor.get(`TFA#${userId}#RECOVERCODE`) as
+      | { code?: string; expiresAt?: number }
+      | undefined;
+    if (!item?.code || !item.expiresAt || item.expiresAt < Math.floor(Date.now() / 1000)) return null;
+    return { code: item.code, expiresAt: item.expiresAt };
+  }
+
+  async deleteRecoverCode(userId: string): Promise<void> {
+    this.twoFactor.delete(`TFA#${userId}#RECOVERCODE`);
   }
 
   async getRate(ip: string): Promise<RateItem | null> {

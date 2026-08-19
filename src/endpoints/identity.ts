@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomInt } from 'node:crypto';
 import {
   clearFailedLogins,
   issueSession,
@@ -10,8 +10,8 @@ import { newToken, newUuid, DEFAULT_KDF, hashPassword } from '../crypto';
 import { twoFactorChallenge, verifyTwoFactorCode } from './two-factor';
 import { badRequest, BitwardenError } from '../errors';
 import type { RouteContext } from '../router';
-import type { DeviceItem, Store, UserItem } from '../store';
-import { TFA_TOKEN_TTL_SECONDS } from '../auth';
+import type { VerifyTokenItem, DeviceItem, Store, UserItem } from '../store';
+import { TFA_TOKEN_TTL_SECONDS, EMAIL_LOCK_MAX, EMAIL_LOCK_TTL_SECONDS } from '../auth';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' };
 
@@ -58,11 +58,21 @@ export function normalizeKdf(kdf: unknown, fallback: KdfConfig): KdfConfig {
 
 // POST /identity/accounts/register and POST /api/accounts/register (both paths).
 // POST /identity/accounts/register/send-verification-email — web vault shows
-// a "verify your email" step after every registration and fires this. No SMTP
-// here, so mirror vaultwarden's no-mail path: return an opaque token directly,
-// the client whips through its finish-signup screen with it and calls
-// register/finish, where we burn the token and create the account.
+// a "verify your email" step after every registration and fires this. With
+// SES configured the code is mailed as a finish-signup link (the web vault
+// finishes registration itself); without a mailer we return the opaque token
+// directly so the client can breeze through (old no-mail path).
 const VERIFY_TOKEN_TTL_SECONDS = 30 * 60;
+
+function originUrl(ctx: RouteContext): string {
+  const h = ctx.headers['host'] ?? ctx.headers['x-forwarded-host'] ?? '';
+  return h ? `https://${h}` : 'https://vaultwarden.free-bert.online';
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mailerAvailable(ctx: RouteContext): boolean {
+  return process.env.SES_SOURCE !== undefined && process.env.SES_SOURCE !== '';
+}
 
 export async function sendVerificationEmail(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
   if (process.env.SIGNUPS_ALLOWED !== 'true') {
@@ -74,20 +84,48 @@ export async function sendVerificationEmail(params: Record<string, string>, ctx:
   if (!email.includes('@')) {
     throw badRequest('Invalid email address.');
   }
-  if (await ctx.store.getUserByEmail(email)) {
+
+  const existing = await ctx.store.getUserByEmail(email);
+  if (existing && existing.emailVerified !== false) {
     throw new BitwardenError(400, 'An account with this email already exists.');
   }
 
   const token = newToken();
-  await ctx.store.putVerifyToken({
+  const item: VerifyTokenItem = {
     pk: `VERIFY#${token}`,
     sk: 'TOKEN',
     email,
     name: String(body.name ?? '').trim() || null,
     expiresAt: Math.floor(Date.now() / 1000) + VERIFY_TOKEN_TTL_SECONDS,
-  });
-  // The client branches on the body being a string: string → finish-signup
-  // with the token, anything else → "check your email" screen (dead end, no SMTP).
+  };
+
+  if (existing) {
+    // Unverified account: resend a verify link (the register call that
+    // created it also accepted a token; this covers clients that skipped it).
+    item.userId = existing.id;
+    await ctx.store.putVerifyToken(item);
+    if (mailerAvailable(ctx)) {
+      await ctx.mailer.send(
+        email,
+        'Verify your email',
+        `Confirm your email: ${originUrl(ctx)}/verify-email.html?userId=${existing.id}&token=${token}`,
+      );
+      return json(200, {});
+    }
+    return json(200, '');
+  }
+
+  await ctx.store.putVerifyToken(item);
+  // Client branches on the body being a string: string → finish-signup with
+  // the token, anything else → "check your email" screen.
+  if (mailerAvailable(ctx)) {
+    await ctx.mailer.send(
+      email,
+      'Finish creating your account',
+      `Finish creating your account: ${originUrl(ctx)}/#/finish-signup?email=${encodeURIComponent(email)}&emailVerificationToken=${token}`,
+    );
+    return json(200, {});
+  }
   return json(200, token);
 }
 
@@ -119,6 +157,7 @@ export async function register(params: Record<string, string>, ctx: RouteContext
   // when the finish request doesn't (vaultwarden register_v2 behavior).
   const verifyToken = String(body.emailVerificationToken ?? '').trim();
   let verifiedName: string | null = null;
+  let verifiedByToken = false;
   if (verifyToken !== '') {
     const v = await ctx.store.getVerifyToken(verifyToken);
     if (!v || v.expiresAt < Math.floor(Date.now() / 1000)) {
@@ -128,6 +167,7 @@ export async function register(params: Record<string, string>, ctx: RouteContext
       throw badRequest('Email verification token does not match email.');
     }
     verifiedName = v.name;
+    verifiedByToken = true;
   }
 
   if (await ctx.store.getUserByEmail(email)) {
@@ -179,6 +219,14 @@ export async function register(params: Record<string, string>, ctx: RouteContext
     typeof unlock.masterKeyWrappedUserKey === 'string' ? unlock.masterKeyWrappedUserKey : null;
   const id = newUuid();
   const now = new Date();
+  // Email verification: a consumed signup token, or a server-issued invite
+  // (org/emergency-access) whose address was already vetted, marks the
+  // account verified. With SES configured, clients that skip verification can
+  // register but cannot log in until they verify (send-verification-email
+  // resends the link). Without a mailer there is no way to verify, so
+  // accounts are born verified (old dev/self-serve behavior).
+  const emailVerified =
+    verifiedByToken || inviteToken !== '' || eaToken !== '' || !mailerAvailable(ctx);
   const user: UserItem = {
     pk: `USER#${id}`,
     sk: 'PROFILE',
@@ -215,6 +263,7 @@ export async function register(params: Record<string, string>, ctx: RouteContext
       typeof body.masterPasswordHint === 'string' && body.masterPasswordHint !== '' ? body.masterPasswordHint : null,
     enabled: true,
     premium: true,
+    emailVerified,
     twoFactorEnabled: false,
     totpSecret: null,
     totpPendingSecret: null,
@@ -450,12 +499,19 @@ async function passwordGrant(ctx: RouteContext, form: Map<string, string>): Prom
   if (!username || !clientHash) return INVALID_GRANT();
 
   await rateLimit(ctx.store, ctx.sourceIp);
+  // Per-account lock: repeated failures against a known email lock the
+  // account briefly regardless of the source IP.
+  if (username) await rateLimit(ctx.store, `email:${username}`, EMAIL_LOCK_MAX, EMAIL_LOCK_TTL_SECONDS);
 
   const user = await ctx.store.getUserByEmail(username);
   if (!user || !verifyClientHash(user, clientHash)) {
     // Same response whether the email is unknown or the password is wrong.
     await recordFailedLogin(ctx.store, ctx.sourceIp);
+    if (username) await recordFailedLogin(ctx.store, `email:${username}`, EMAIL_LOCK_TTL_SECONDS);
     return INVALID_GRANT();
+  }
+  if (user.emailVerified === false) {
+    return oauthError(400, 'invalid_grant', 'Email not verified.');
   }
   if (!user.enabled) {
     return oauthError(400, 'invalid_grant', 'This user has been disabled');
@@ -524,6 +580,7 @@ async function passwordGrant(ctx: RouteContext, form: Map<string, string>): Prom
   }
 
   await clearFailedLogins(ctx.store, ctx.sourceIp);
+  if (username) await clearFailedLogins(ctx.store, `email:${username}`);
 
   await upsertDevice(ctx.store, user, form, deviceId);
   const pair = await issueSession(ctx.store, user, deviceId);
@@ -577,6 +634,52 @@ export async function endsession(params: Record<string, string>, ctx: RouteConte
       }
       await ctx.store.deleteSession(value);
     }
+  }
+  return json(200, {});
+}
+// POST /identity/accounts/recover — email a one-time 8-digit recovery code
+// (15 min TTL). Always 200 for unknown emails (anti-enumeration); a fresh
+// code whitelists a new one at most once per minute.
+export async function recoverPassword(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  return sendRecoveryCode(ctx, false);
+}
+
+// POST /identity/accounts/recover/two-factor — same code, used to bypass the
+// 2FA challenge at login (accepted by verifyTwoFactorCode). Only emailed to
+// accounts that actually have 2FA enabled; others get a silent 200.
+export async function recoverTwoFactor(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  return sendRecoveryCode(ctx, true);
+}
+
+const RECOVER_CODE_TTL_SECONDS = 900;
+const RECOVER_CODE_MIN_INTERVAL_SECONDS = 60;
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function sendRecoveryCode(ctx: RouteContext, twoFactorOnly: boolean): Promise<unknown> {
+  const body = (ctx.bodyJson ?? {}) as Record<string, unknown>;
+  const email = (jsonValue(body, 'email') ?? '').toString().trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return json(200, {});
+
+  const user = await ctx.store.getUserByEmail(email);
+  if (!user || (twoFactorOnly && !user.twoFactorEnabled)) return json(200, {});
+
+  const existing = await ctx.store.getRecoverCode(user.id);
+  if (existing && existing.expiresAt > Math.floor(Date.now() / 1000) - RECOVER_CODE_MIN_INTERVAL_SECONDS) {
+    return json(429, { error: 'Recovery email was sent recently; wait a minute and retry.' });
+  }
+
+  const code = String(randomInt(0, 1_0000_0000)).padStart(8, '0');
+  const expiresAt = Math.floor(Date.now() / 1000) + RECOVER_CODE_TTL_SECONDS;
+  await ctx.store.putRecoverCode(user.id, code, expiresAt);
+  try {
+    await ctx.mailer.send(
+      user.email,
+      'Vaultwarden recovery code',
+      `Your vaultwarden recovery code is ${code}.\nIt expires in 15 minutes. If you did not request it, you can ignore this email.`,
+    );
+  } catch (err) {
+    console.error('recover: SES send failed', err);
+    return json(500, { error: 'Failed to send the recovery email.' });
   }
   return json(200, {});
 }

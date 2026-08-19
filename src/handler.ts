@@ -1,6 +1,6 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResult } from 'aws-lambda';
 import { config, alive, now, version, domainsGet, domainsPut, hibpBreach } from './endpoints/misc';
-import { register, sendVerificationEmail, prelogin, token, endsession } from './endpoints/identity';
+import { register, sendVerificationEmail, prelogin, token, endsession, recoverPassword, recoverTwoFactor } from './endpoints/identity';
 import { deviceList, deviceCreate, deviceById, deviceRegisterToken, deviceClearToken } from './endpoints/devices';
 import {
   profile,
@@ -11,6 +11,11 @@ import {
   changeKdf,
   rotateSecurityStamp,
   verifyPassword,
+  passwordHint,
+  setPasswordHint,
+  recoverReset,
+  changeEmail,
+  verifyEmail,
   deleteAccount,
   updateProfile,
 } from './endpoints/accounts';
@@ -24,6 +29,11 @@ import {
   cipherDelete,
   cipherSoftDelete,
   cipherRestore,
+  cipherArchive,
+  cipherUnarchive,
+  cipherBulkArchive,
+  cipherBulkUnarchive,
+  cipherBulkRestore,
   cipherMove,
   cipherPurge,
   cipherBulkDelete,
@@ -118,6 +128,7 @@ import { BitwardenError, internalError, notFound, toErrorBody } from './errors';
 import { match, Route, RouteContext } from './router';
 import { Store, MemoryStore, DynamoStore } from './store';
 import { MemoryObjectStore, S3ObjectStore, type ObjectStore } from './objects';
+import { sesMailer, type Mailer } from './ses';
 import { authenticate } from './auth';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' };
@@ -126,6 +137,7 @@ export interface Deps {
   store: Store;
   objects?: ObjectStore;
   icons?: ObjectStore;
+  mailer?: Mailer;
 }
 
 function defaultObjects(): ObjectStore {
@@ -160,6 +172,8 @@ export const defaultRoutes: Route[] = [
   { method: 'POST', pattern: '/identity/accounts/prelogin', handler: prelogin },
   { method: 'POST', pattern: '/identity/accounts/prelogin/password', handler: prelogin },
   { method: 'POST', pattern: '/api/accounts/prelogin', handler: prelogin },
+  { method: 'POST', pattern: '/identity/accounts/recover', handler: recoverPassword },
+  { method: 'POST', pattern: '/identity/accounts/recover/two-factor', handler: recoverTwoFactor },
   { method: 'POST', pattern: '/identity/connect/token', handler: token },
   { method: 'POST', pattern: '/identity/connect/endsession', handler: endsession },
   { method: 'GET', pattern: '/api/devices', handler: deviceList, auth: true },
@@ -189,6 +203,12 @@ export const defaultRoutes: Route[] = [
   { method: 'POST', pattern: '/api/ciphers/:cipherId/soft-delete', handler: cipherSoftDelete, auth: true },
   { method: 'PUT', pattern: '/api/ciphers/:cipherId/restore', handler: cipherRestore, auth: true },
   { method: 'POST', pattern: '/api/ciphers/:cipherId/restore', handler: cipherRestore, auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/:cipherId/archive', handler: cipherArchive, auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/:cipherId/unarchive', handler: cipherUnarchive, auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/archive', handler: cipherBulkArchive, auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/unarchive', handler: cipherBulkUnarchive, auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/restore', handler: cipherBulkRestore, auth: true },
+  { method: 'POST', pattern: '/api/ciphers/restore', handler: cipherBulkRestore, auth: true },
   { method: 'PUT', pattern: '/api/ciphers/:cipherId/move', handler: cipherMove, auth: true },
   { method: 'POST', pattern: '/api/ciphers/:cipherId/move', handler: cipherMove, auth: true },
   { method: 'PUT', pattern: '/api/ciphers/move', handler: cipherMove, auth: true },
@@ -273,6 +293,11 @@ export const defaultRoutes: Route[] = [
   { method: 'POST', pattern: '/api/accounts/kdf', handler: changeKdf, auth: true },
   { method: 'POST', pattern: '/api/accounts/security-stamp', handler: rotateSecurityStamp, auth: true },
   { method: 'POST', pattern: '/api/accounts/verify-password', handler: verifyPassword, auth: true },
+  { method: 'GET', pattern: '/api/accounts/hint', handler: passwordHint },
+  { method: 'POST', pattern: '/api/accounts/password-hint', handler: setPasswordHint, auth: true },
+  { method: 'POST', pattern: '/api/accounts/recover/reset', handler: recoverReset },
+  { method: 'POST', pattern: '/api/accounts/email', handler: changeEmail, auth: true },
+  { method: 'POST', pattern: '/api/accounts/verify-email', handler: verifyEmail },
   { method: 'POST', pattern: '/api/accounts/delete', handler: deleteAccount, auth: true },
   { method: 'DELETE', pattern: '/api/accounts', handler: deleteAccount, auth: true },
   { method: 'PUT', pattern: '/api/accounts/profile', handler: updateProfile, auth: true },
@@ -315,7 +340,7 @@ function json(statusCode: number, body: string): APIGatewayProxyResult {
 
 // One-shot body parsing: identity endpoints send form-urlencoded, the rest of
 // the API sends JSON. base64 decoding applies to whichever it is.
-function parseBody(event: APIGatewayProxyEventV2): Omit<RouteContext, 'store' | 'objects' | 'icons'> {
+function parseBody(event: APIGatewayProxyEventV2, mailer: Mailer): Omit<RouteContext, 'store' | 'objects' | 'icons'> {
   const raw = event.body ?? '';
   const bytes = event.isBase64Encoded ? Buffer.from(raw, 'base64') : Buffer.from(raw, 'utf-8');
   const decoded = bytes.toString('utf-8');
@@ -348,6 +373,7 @@ function parseBody(event: APIGatewayProxyEventV2): Omit<RouteContext, 'store' | 
     headers,
     query: Object.fromEntries(new URLSearchParams(event.rawQueryString ?? '')),
     sourceIp: event.requestContext.http.sourceIp ?? '',
+    mailer: mailer,
   };
 }
 
@@ -363,7 +389,7 @@ export function createHandler(routes: Route[], deps: Deps = defaultDeps) {
         result = json(notFound().status, toErrorBody(notFound()));
       } else {
         const ctx: RouteContext = {
-          ...parseBody(event),
+          ...parseBody(event, deps.mailer ?? sesMailer),
           store: deps.store,
           objects: deps.objects ?? defaultObjects(),
           icons: deps.icons ?? defaultIconsObjects(),

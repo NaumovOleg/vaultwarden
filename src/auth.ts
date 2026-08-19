@@ -7,6 +7,8 @@ export const ACCESS_TTL_SECONDS = 3600;
 export const REFRESH_TTL_SECONDS = 30 * 24 * 3600;
 export const RATE_TTL_SECONDS = 60;
 export const MAX_FAILED_LOGINS = 10;
+export const EMAIL_LOCK_MAX = 5;
+export const EMAIL_LOCK_TTL_SECONDS = 600;
 export const TFA_TOKEN_TTL_SECONDS = 300;
 
 export interface SessionPair {
@@ -111,18 +113,19 @@ export function verifyClientHash(user: UserItem, clientHash: unknown): boolean {
   );
 }
 
-// Fixed-window per-IP counter, 10 failures/minute. Success clears the window.
-export async function rateLimit(store: Store, ip: string): Promise<void> {
-  const rate = await store.getRate(ip);
-  if (rate && rate.count >= MAX_FAILED_LOGINS) {
+// Fixed-window per-key counter (IP or "email:{email}"), max failures per
+// TTL window. Success clears the window.
+export async function rateLimit(store: Store, key: string, max = MAX_FAILED_LOGINS, ttl = RATE_TTL_SECONDS): Promise<void> {
+  const rate = await store.getRate(key);
+  if (rate && rate.count >= max) {
     throw new BitwardenError(429, 'Too many login attempts. Try again later.');
   }
 }
 
-export async function recordFailedLogin(store: Store, ip: string): Promise<void> {
-  await store.incrementRate(ip, RATE_TTL_SECONDS);
+export async function recordFailedLogin(store: Store, key: string, ttl = RATE_TTL_SECONDS): Promise<void> {
+  await store.incrementRate(key, ttl);
 }
 
-export async function clearFailedLogins(store: Store, ip: string): Promise<void> {
-  await store.clearRate(ip);
+export async function clearFailedLogins(store: Store, key: string): Promise<void> {
+  await store.clearRate(key);
 }
