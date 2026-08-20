@@ -116,11 +116,12 @@ export async function sendVerificationEmail(params: Record<string, string>, ctx:
           'Verify your email',
           `Confirm your email: ${originUrl(ctx)}/verify-email.html?userId=${existing.id}&token=${token}`,
         );
+        return json(200, {});
       } catch (err) {
-        console.error('sendVerificationEmail: SES send failed', err);
-        return json(500, { error: 'Failed to send the verification email.' });
+        // SES sandbox rejects unverified recipients (or any send failure) —
+        // never block signup on it, fall through to the no-mailer response.
+        console.error('sendVerificationEmail: SES send failed, falling back', err);
       }
-      return json(200, {});
     }
     return json(200, '');
   }
@@ -135,13 +136,21 @@ export async function sendVerificationEmail(params: Record<string, string>, ctx:
         'Finish creating your account',
         `Finish creating your account: ${originUrl(ctx)}/#/finish-signup?email=${encodeURIComponent(email)}&token=${token}&emailVerificationToken=${token}&fromEmail=true`,
       );
+      return json(200, {});
     } catch (err) {
-      console.error('sendVerificationEmail: SES send failed', err);
-      return json(500, { error: 'Failed to send the verification email.' });
+      console.error('sendVerificationEmail: SES send failed, falling back', err);
     }
-    return json(200, {});
   }
   return json(200, token);
+}
+
+// POST /identity and /api accounts/register/verification-email-clicked — fired
+// by the web vault on the finish-signup page (the email link was clicked).
+// Upstream Bitwarden records the click for its email provider; it's a void
+// endpoint the client needs to resolve 200 to proceed to register. We accept
+// the token it carries and answer success without touching the store.
+export async function verificationEmailClicked(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  return json(200, {});
 }
 
 export async function register(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {

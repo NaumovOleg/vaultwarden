@@ -291,9 +291,12 @@ const jwtSecretParam = new ssm.StringParameter(this, 'JwtSecretParam', {
           // Same-origin policy for the SPA: it must keep loading its own
           // scripts/styles and calling the same-origin API. The API Lambda's
           // responses carry a stricter default-src 'none' (JSON has no
-          // document context).
+          // document context). 'wasm-unsafe-eval' is required: the 2026
+          // clients run the password-manager crypto in a WebAssembly SDK,
+          // and without it WebAssembly.instantiate is blocked (the vault
+          // hangs with a TextDecoder crash).
           contentSecurityPolicy:
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; " +
             "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; " +
             "worker-src 'self' blob:; base-uri 'self'; frame-ancestors 'none'",
         },

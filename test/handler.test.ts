@@ -20,6 +20,11 @@ describe('handler', () => {
     expect(r.body).toBe(BUILD_TAG);
   });
 
+  it('POST verification-email-clicked resolves 200 so finish-signup proceeds', async () => {
+    expect((await handler(event('POST', '/identity/accounts/register/verification-email-clicked'))).statusCode).toBe(200);
+    expect((await handler(event('POST', '/api/accounts/register/verification-email-clicked'))).statusCode).toBe(200);
+  });
+
   it('responds 200 to GET /now and GET /api/version', async () => {
     expect((await handler(event('GET', '/now'))).statusCode).toBe(200);
     expect((await handler(event('GET', '/api/version'))).statusCode).toBe(200);

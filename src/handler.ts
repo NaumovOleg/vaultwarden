@@ -1,6 +1,6 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResult } from 'aws-lambda';
 import { config, alive, now, version, domainsGet, domainsPut, hibpBreach } from './endpoints/misc';
-import { register, sendVerificationEmail, prelogin, token, endsession, recoverPassword, recoverTwoFactor } from './endpoints/identity';
+import { register, sendVerificationEmail, verificationEmailClicked, prelogin, token, endsession, recoverPassword, recoverTwoFactor } from './endpoints/identity';
 import { deviceList, deviceCreate, deviceById, deviceRegisterToken, deviceClearToken, knownDevice } from './endpoints/devices';
 import {
   profile,
@@ -148,6 +148,10 @@ const SECURITY_HEADERS = {
 function withSecurityHeaders(res: APIGatewayProxyResult): APIGatewayProxyResult {
   if (!res.headers) res.headers = {};
   Object.assign(res.headers, SECURITY_HEADERS);
+  // Dev-server CORS (linux: the web vault runs on a separate dev origin).
+  res.headers['Access-Control-Allow-Origin'] = '*';
+  res.headers['Access-Control-Allow-Methods'] = 'GET,POST,PUT,DELETE,OPTIONS';
+  res.headers['Access-Control-Allow-Headers'] = '*';
   return res;
 }
 
@@ -197,6 +201,8 @@ export const defaultRoutes: Route[] = [
   { method: 'GET', pattern: '/icons/:host/icon.png', handler: iconHandler },
   { method: 'GET', pattern: '/api/config', handler: config },
   { method: 'POST', pattern: '/identity/accounts/register/send-verification-email', handler: sendVerificationEmail },
+  { method: 'POST', pattern: '/identity/accounts/register/verification-email-clicked', handler: verificationEmailClicked },
+  { method: 'POST', pattern: '/api/accounts/register/verification-email-clicked', handler: verificationEmailClicked },
   { method: 'POST', pattern: '/identity/accounts/register/finish', handler: register },
   { method: 'POST', pattern: '/api/accounts/register/finish', handler: register },
   { method: 'POST', pattern: '/identity/accounts/register', handler: register },
@@ -417,31 +423,35 @@ export function createHandler(routes: Route[], deps: Deps = defaultDeps) {
 
     let result: APIGatewayProxyResult;
     try {
-      const bodyLimit = isFileUploadPath(path) ? MAX_FILE_BODY_BYTES : MAX_API_BODY_BYTES;
-      if (approximateBodyBytes(event) > bodyLimit) {
-        result = json(413, '{"Message":"Request body too large."}');
+      if (method === 'OPTIONS') {
+        result = { statusCode: 204, headers: JSON_HEADERS, body: '' };
       } else {
-        const route = match(method, path, routes);
-        if (!route) {
-          result = json(notFound().status, toErrorBody(notFound()));
+        const bodyLimit = isFileUploadPath(path) ? MAX_FILE_BODY_BYTES : MAX_API_BODY_BYTES;
+        if (approximateBodyBytes(event) > bodyLimit) {
+          result = json(413, '{"Message":"Request body too large."}');
         } else {
-          const ctx: RouteContext = {
-            ...parseBody(event, deps.mailer ?? sesMailer),
-            store: deps.store,
-            objects: deps.objects ?? defaultObjects(),
-            icons: deps.icons ?? defaultIconsObjects(),
-          };
-          if (route.auth) {
-            const authn = await authenticate(deps.store, ctx);
-            if (!authn) {
-              result = { statusCode: 401, headers: JSON_HEADERS, body: '{"Message":"Unauthorized"}' };
+          const route = match(method, path, routes);
+          if (!route) {
+            result = json(notFound().status, toErrorBody(notFound()));
+          } else {
+            const ctx: RouteContext = {
+              ...parseBody(event, deps.mailer ?? sesMailer),
+              store: deps.store,
+              objects: deps.objects ?? defaultObjects(),
+              icons: deps.icons ?? defaultIconsObjects(),
+            };
+            if (route.auth) {
+              const authn = await authenticate(deps.store, ctx);
+              if (!authn) {
+                result = { statusCode: 401, headers: JSON_HEADERS, body: '{"Message":"Unauthorized"}' };
+              } else {
+                ctx.user = authn.user;
+                ctx.session = authn.session;
+                result = (await route.handler(route.params, ctx)) as APIGatewayProxyResult;
+              }
             } else {
-              ctx.user = authn.user;
-              ctx.session = authn.session;
               result = (await route.handler(route.params, ctx)) as APIGatewayProxyResult;
             }
-          } else {
-            result = (await route.handler(route.params, ctx)) as APIGatewayProxyResult;
           }
         }
       }

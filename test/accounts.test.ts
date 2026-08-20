@@ -31,6 +31,12 @@ function makeEnv() {
   return { store, handler: createHandler(routes, { store }) };
 }
 
+function makeEnvWithFailingMailer() {
+  const store = new MemoryStore();
+  const mailer = { send: async () => { throw new Error('SES sandbox: recipient not verified'); } };
+  return { store, handler: createHandler(routes, { store, mailer }) };
+}
+
 function ev(method: string, rawPath: string, body = '', token?: string, rawQueryString = ''): APIGatewayProxyEventV2 {
   const headers: Record<string, string> = {};
   if (token) headers['authorization'] = `Bearer ${token}`;
@@ -123,6 +129,22 @@ describe('profile + sync bundle', () => {
     expect(JSON.parse(reuse.body as string).Message).toContain('token');
   });
 
+  it('send-verification-email falls back to the token when SES send fails', async () => {
+    const oldSes = process.env.SES_SOURCE;
+    process.env.SES_SOURCE = 'no-reply@vault.local';
+    try {
+      const env = makeEnvWithFailingMailer();
+      const send = await env.handler(
+        ev('POST', '/identity/accounts/register/send-verification-email', JSON.stringify({ email: 'ses-fail@example.com' })),
+      );
+      expect(send.statusCode).toBe(200);
+      expect(typeof JSON.parse(send.body as string)).toBe('string');
+    } finally {
+      if (oldSes === undefined) delete process.env.SES_SOURCE;
+      else process.env.SES_SOURCE = oldSes;
+    }
+  });
+
   it('register accepts the 2026 auth format (salt + masterPasswordAuthenticationHash) and logs in', async () => {
     const env = makeEnv();
     const email = 'v2-flow@example.com';
@@ -164,7 +186,7 @@ describe('profile + sync bundle', () => {
         }).toString(),
       ),
     );
-    expect(login.statusCode).toBe(200);
+expect(login.statusCode).toBe(200);
     const body = JSON.parse(login.body as string);
     expect(body.access_token).toBeTruthy();
     expect(body.Key).toBe('wrapped-key');
