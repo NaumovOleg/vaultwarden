@@ -21,10 +21,13 @@ const routes: Route[] = [
   { method: 'DELETE', pattern: '/api/ciphers/:cipherId', handler: (p, c) => cipherDelete(p, c), auth: true },
   { method: 'DELETE', pattern: '/api/ciphers/:cipherId/delete', handler: (p, c) => cipherDelete(p, c), auth: true },
   { method: 'POST', pattern: '/api/ciphers/:cipherId/delete', handler: (p, c) => cipherDelete(p, c), auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/:cipherId/delete', handler: (p, c) => cipherSoftDelete(p, c), auth: true },
   { method: 'PUT', pattern: '/api/ciphers/:cipherId/soft-delete', handler: (p, c) => cipherSoftDelete(p, c), auth: true },
   { method: 'POST', pattern: '/api/ciphers/:cipherId/soft-delete', handler: (p, c) => cipherSoftDelete(p, c), auth: true },
   { method: 'PUT', pattern: '/api/ciphers/:cipherId/restore', handler: (p, c) => cipherRestore(p, c), auth: true },
   { method: 'POST', pattern: '/api/ciphers/:cipherId/restore', handler: (p, c) => cipherRestore(p, c), auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/restore', handler: (p, c) => cipherBulkRestore(p, c), auth: true },
+  { method: 'POST', pattern: '/api/ciphers/restore', handler: (p, c) => cipherBulkRestore(p, c), auth: true },
   { method: 'PUT', pattern: '/api/ciphers/:cipherId/archive', handler: (p, c) => cipherArchive(p, c), auth: true },
   { method: 'PUT', pattern: '/api/ciphers/:cipherId/unarchive', handler: (p, c) => cipherUnarchive(p, c), auth: true },
   { method: 'PUT', pattern: '/api/ciphers/archive', handler: (p, c) => cipherBulkArchive(p, c), auth: true },
@@ -32,6 +35,8 @@ const routes: Route[] = [
   { method: 'POST', pattern: '/api/ciphers/move', handler: (p, c) => cipherMove(p, c), auth: true },
   { method: 'POST', pattern: '/api/ciphers/purge', handler: (p, c) => cipherPurge(p, c), auth: true },
   { method: 'POST', pattern: '/api/ciphers/delete', handler: (p, c) => cipherBulkDelete(p, c), auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/delete', handler: (p, c) => cipherBulkSoftDelete(p, c), auth: true },
+  { method: 'DELETE', pattern: '/api/ciphers', handler: (p, c) => cipherBulkDelete(p, c), auth: true },
   { method: 'GET', pattern: '/api/sync', handler: (p, c) => sync(p, c), auth: true },
 ];
 
@@ -48,9 +53,11 @@ import {
   cipherUnarchive,
   cipherBulkArchive,
   cipherBulkUnarchive,
+  cipherBulkRestore,
   cipherMove,
   cipherPurge,
   cipherBulkDelete,
+  cipherBulkSoftDelete,
 } from '../src/endpoints/ciphers';
 import { sync } from '../src/endpoints/accounts';
 
@@ -335,6 +342,12 @@ describe('cipher CRUD', () => {
     expect(after.data).toHaveLength(1);
     expect(after.data[0].deletedDate).toBeNull();
 
+    // Mobile apps trash via PUT /{id}/delete (soft), the path that made the
+    // Android Delete action 404.
+    const mobileDel = await env.handler(ev('PUT', `/api/ciphers/${cid}/delete`, '', at));
+    expect(mobileDel.statusCode).toBe(200);
+    expect((await env.store.getCipher((await env.store.getUserByEmail('trash@example.com'))!.id, cid))!.deletedDate).not.toBeNull();
+
     // DELETE = permanent (Bitwarden spec), unlike the trashing soft-delete.
     const hard = await env.handler(ev('DELETE', `/api/ciphers/${cid}`, '', at));
     expect(hard.statusCode).toBe(200);
@@ -375,7 +388,7 @@ describe('cipher CRUD', () => {
     expect(syncBody.ciphers.every((c: { archivedDate: string | null }) => c.archivedDate !== null)).toBe(true);
   });
 
-it('move sets folderId; bulk delete removes rows permanently', async () => {
+it('move sets folderId; PUT bulk delete soft-trashes, POST/DELETE bulk remove permanently', async () => {
     const env = makeEnv();
     const at = await seed(env, 'lifecycle@example.com');
     const c1 = JSON.parse((await env.handler(ev('POST', '/api/ciphers', JSON.stringify(LOGIN_CIPHER), at))).body as string).id;
@@ -389,11 +402,27 @@ it('move sets folderId; bulk delete removes rows permanently', async () => {
     const afterMove = await env.store.getCipher(userId, c1);
     expect(afterMove!.folderId).toBe('folder-1');
 
-    const bulkDel = await env.handler(ev('POST', '/api/ciphers/delete', JSON.stringify({ ids: [c1, c2] }), at));
+    // PUT /api/ciphers/delete = mobile soft-delete alias → trash, restorable.
+    const soft = await env.handler(ev('PUT', '/api/ciphers/delete', JSON.stringify({ ids: [c1, c2] }), at));
+    expect(soft.statusCode).toBe(200);
+    expect(await env.store.getCipher(userId, c1)).toMatchObject({ deletedDate: expect.any(String) });
+    expect(await env.store.getCipher(userId, c2)).toMatchObject({ deletedDate: expect.any(String) });
+
+    const restore = await env.handler(ev('POST', '/api/ciphers/restore', JSON.stringify({ ids: [c1, c2] }), at));
+    expect(restore.statusCode).toBe(200);
+    expect((await env.store.getCipher(userId, c1))!.deletedDate).toBeNull();
+
+    // DELETE /api/ciphers (bulk) = permanent, like POST /api/ciphers/delete.
+    const bulkDel = await env.handler(ev('DELETE', '/api/ciphers', JSON.stringify({ ids: [c1, c2] }), at));
     expect(bulkDel.statusCode).toBe(200);
-    const uid = (await env.store.getUserByEmail('lifecycle@example.com'))!.id;
-    expect(await env.store.getCipher(uid, c1)).toBeNull();
-    expect(await env.store.getCipher(uid, c2)).toBeNull();
+    expect(await env.store.getCipher(userId, c1)).toBeNull();
+    expect(await env.store.getCipher(userId, c2)).toBeNull();
+
+    // POST remains the permanent bulk path.
+    const c3 = JSON.parse((await env.handler(ev('POST', '/api/ciphers', JSON.stringify(LOGIN_CIPHER), at))).body as string).id;
+    const postDel = await env.handler(ev('POST', '/api/ciphers/delete', JSON.stringify({ ids: [c3] }), at));
+    expect(postDel.statusCode).toBe(200);
+    expect(await env.store.getCipher(userId, c3)).toBeNull();
   });
 
   it('404 on a foreign/unknown cipher id; 401 without bearer', async () => {

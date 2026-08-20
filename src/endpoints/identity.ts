@@ -246,12 +246,12 @@ export async function register(params: Record<string, string>, ctx: RouteContext
   const now = new Date();
   // Email verification: a consumed signup token, or a server-issued invite
   // (org/emergency-access) whose address was already vetted, marks the
-  // account verified. With SES configured, clients that skip verification can
-  // register but cannot log in until they verify (send-verification-email
-  // resends the link). Without a mailer there is no way to verify, so
-  // accounts are born verified (old dev/self-serve behavior).
-  const emailVerified =
-    verifiedByToken || inviteToken !== '' || eaToken !== '' || !mailerAvailable(ctx);
+  // account verified. Token-less registers are mobile/CLI clients: SES sandbox
+  // rejects fresh recipients, so their verification link can never arrive —
+  // a token-less account is born verified or it bricks at login ("Email not
+  // verified." with no way to verify). That is also the pre-SES contract
+  // (9170997: "accounts are created already verified").
+  const emailVerified = verifiedByToken || inviteToken !== '' || eaToken !== '' || verifyToken === '';
   const user: UserItem = {
     pk: `USER#${id}`,
     sk: 'PROFILE',

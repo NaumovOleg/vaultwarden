@@ -17,6 +17,7 @@ const routes: Route[] = [
 
 const PASSWORD = Buffer.from('client-hash').toString('base64');
 const EMAIL = 'verify-me@test.dev';
+const OTHER_EMAIL = 'verify-me-2@test.dev';
 
 function makeEnv() {
   process.env.SIGNUPS_ALLOWED = 'true';
@@ -113,9 +114,10 @@ describe('email verification + change', () => {
     delete process.env.SES_SOURCE;
   });
 
-  it('registers unverified with SES, verifies via emailed link, then logs in', async () => {
+  it('token-less register is born verified (mobile flow: no mailer link exists, SES sandbox blocks fresh recipients)', async () => {
     const env = makeEnv();
-    // Registration without a token creates an unverified account…
+    // Registration without a token — Android/CLI path — must not create an
+    // account that can never log in.
     const reg = await env.handler(
       apiEvent('POST', '/identity/accounts/register', {
         email: EMAIL,
@@ -126,35 +128,27 @@ describe('email verification + change', () => {
     );
     expect(reg.statusCode).toBe(200);
 
-    // …which cannot log in yet.
-    const blocked = await env.handler(
-      formEvent({
-        grant_type: 'password',
-        username: EMAIL,
-        password: PASSWORD,
-        scope: 'api offline_access',
-        deviceIdentifier: 'dev-1',
-        deviceType: '9',
-      }),
-    );
-    expect(blocked.statusCode).toBe(400);
-
-    // Resend endpoint emails a verify link for the existing account.
-    const resend = await env.handler(apiEvent('POST', '/identity/accounts/register/send-verification-email', { email: EMAIL }));
-    expect(resend.statusCode).toBe(200);
-    expect(env.send).toHaveBeenCalledTimes(1);
-    const link = linkParts(env.send, 0);
-    expect(link.token.length).toBeGreaterThan(20);
-
-    const verify = await env.handler(apiEvent('POST', '/api/accounts/verify-email', { userId: link.userId, token: link.token }));
-    expect(verify.statusCode).toBe(200);
-
+    // Login works immediately.
     const ok = await accessToken(env.handler);
     expect(ok).toBeDefined();
 
-    // Token is single-use.
-    const replay = await env.handler(apiEvent('POST', '/api/accounts/verify-email', { userId: link.userId, token: link.token }));
-    expect(replay.statusCode).toBe(400);
+    // The verify-email machinery stays for token flows: the web vault's
+    // send-verification-email mails a finish-signup link with a single-use
+    // token that registers a second account.
+    const pre = await env.handler(apiEvent('POST', '/identity/accounts/register/send-verification-email', { email: OTHER_EMAIL }));
+    expect(pre.statusCode).toBe(200);
+    const token = /emailVerificationToken=([A-Za-z0-9_-]+)/.exec(lastSendBody(env.send))?.[1];
+    expect(token).toBeTruthy();
+    const second = await env.handler(
+      apiEvent('POST', '/identity/accounts/register', {
+        email: OTHER_EMAIL,
+        emailVerificationToken: token,
+        masterPasswordAuthentication: { hash: PASSWORD },
+        key: 'akey',
+        keys: { publicKey: 'pub', privateKey: 'priv' },
+      }),
+    );
+    expect(second.statusCode).toBe(200);
   });
 
   it('changes email only after the new address confirms its link', async () => {

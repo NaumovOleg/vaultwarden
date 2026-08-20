@@ -401,7 +401,9 @@ export async function cipherPurge(params: Record<string, string>, ctx: RouteCont
   return json(200, {});
 }
 
-// POST|PUT /api/ciphers/delete — bulk PERMANENT delete {ids}
+// POST|PUT /api/ciphers/delete — bulk delete. POST removes permanently
+// (Bitwarden spec); PUT is the mobile soft-delete alias (vaultwarden
+// delete_cipher_selected_put) — trash, restorable.
 export async function cipherBulkDelete(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
   const ids: unknown[] = ctx.bodyJson.ids ?? [];
   for (const id of ids) {
@@ -412,6 +414,17 @@ export async function cipherBulkDelete(params: Record<string, string>, ctx: Rout
       if (orgId) await ctx.store.deleteOrgCipher(orgId, id);
       else await ctx.store.deleteCipher(ctx.user!.id, id);
     }
+  }
+  return json(200, {});
+}
+
+export async function cipherBulkSoftDelete(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const ids: unknown[] = ctx.bodyJson.ids ?? [];
+  for (const id of ids) {
+    if (typeof id !== 'string') continue;
+    const { item, canWrite } = await resolveCipher(ctx, id);
+    if (!canWrite) continue;
+    await ctx.store.putCipher({ ...item, deletedDate: new Date().toISOString(), revisionDate: new Date().toISOString() });
   }
   return json(200, {});
 }

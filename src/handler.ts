@@ -37,6 +37,7 @@ import {
   cipherMove,
   cipherPurge,
   cipherBulkDelete,
+  cipherBulkSoftDelete,
   cipherImport,
   attachmentCreateV2,
   attachmentUpload,
@@ -238,6 +239,10 @@ export const defaultRoutes: Route[] = [
   { method: 'DELETE', pattern: '/api/ciphers/:cipherId', handler: cipherDelete, auth: true },
   { method: 'DELETE', pattern: '/api/ciphers/:cipherId/delete', handler: cipherDelete, auth: true },
   { method: 'POST', pattern: '/api/ciphers/:cipherId/delete', handler: cipherDelete, auth: true },
+  // Mobile clients trash a cipher with PUT /delete (soft), like the web
+  // vault uses PUT /soft-delete; POST/DELETE stay permanent. Matching
+  // vaultwarden, where PUT /ciphers/{id}/delete is the soft-delete path.
+  { method: 'PUT', pattern: '/api/ciphers/:cipherId/delete', handler: cipherSoftDelete, auth: true },
   { method: 'PUT', pattern: '/api/ciphers/:cipherId/soft-delete', handler: cipherSoftDelete, auth: true },
   { method: 'POST', pattern: '/api/ciphers/:cipherId/soft-delete', handler: cipherSoftDelete, auth: true },
   { method: 'PUT', pattern: '/api/ciphers/:cipherId/restore', handler: cipherRestore, auth: true },
@@ -309,7 +314,8 @@ export const defaultRoutes: Route[] = [
   { method: 'DELETE', pattern: '/api/organizations/:id/collections/:collectionId', handler: collectionDelete, auth: true },
   { method: 'POST', pattern: '/api/organizations/:id/collections/:collectionId/delete', handler: collectionDelete, auth: true },
   { method: 'POST', pattern: '/api/ciphers/delete', handler: cipherBulkDelete, auth: true },
-  { method: 'PUT', pattern: '/api/ciphers/delete', handler: cipherBulkDelete, auth: true },
+  { method: 'PUT', pattern: '/api/ciphers/delete', handler: cipherBulkSoftDelete, auth: true },
+  { method: 'DELETE', pattern: '/api/ciphers', handler: cipherBulkDelete, auth: true },
   { method: 'GET', pattern: '/api/ciphers/organization-details', handler: cipherOrganizationDetails, auth: true },
   { method: 'GET', pattern: '/api/ciphers/organization-details/:organizationId', handler: cipherOrganizationDetails, auth: true },
   { method: 'POST', pattern: '/api/ciphers/:cipherId/share', handler: cipherShare, auth: true },
@@ -386,6 +392,10 @@ function parseBody(event: APIGatewayProxyEventV2, mailer: Mailer): Omit<RouteCon
   const rawHeaders = event.headers ?? {};
   const headers: Record<string, string> = {};
   for (const [k, v] of Object.entries(rawHeaders)) headers[k.toLowerCase()] = v ?? '';
+  // Direct TCP peer under CloudFront is the edge IP — shared by every client,
+  // unusable for per-IP rate limiting. Real client is the first XFF hop.
+  const xff = (headers['x-forwarded-for'] ?? '').split(',')[0]?.trim() ?? '';
+  const sourceIp = xff || (event.requestContext.http.sourceIp ?? '');
   const contentType = headers['content-type'] ?? '';
   let form: URLSearchParams;
   let jsonBody: Record<string, any> = {};
@@ -411,7 +421,7 @@ function parseBody(event: APIGatewayProxyEventV2, mailer: Mailer): Omit<RouteCon
     bodyJson: jsonBody,
     headers,
     query: Object.fromEntries(new URLSearchParams(event.rawQueryString ?? '')),
-    sourceIp: event.requestContext.http.sourceIp ?? '',
+    sourceIp,
     mailer: mailer,
   };
 }
