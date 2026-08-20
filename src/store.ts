@@ -1,4 +1,5 @@
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { randomUUID } from 'node:crypto';
 import {
   DeleteCommand,
   DynamoDBDocumentClient,
@@ -113,6 +114,19 @@ export interface RateItem {
   pk: string; // RATE#{ip}
   sk: string; // LOGIN
   count: number;
+  expiresAt: number;
+}
+
+// Security audit trail, TTL'd (~30 days). Never holds secrets: no codes, no
+// tokens, no password hashes. userId is the account id (or the attempted
+// email for failed logins where no account exists).
+export interface AuditItem {
+  pk: string; // AUDIT#{userId}#{epochMs}#{rand}
+  sk: string; // AUDIT
+  userId: string;
+  event: string;
+  details: string | null; // JSON string
+  timestamp: number;
   expiresAt: number;
 }
 
@@ -299,6 +313,7 @@ export interface Store {
   putRate(item: RateItem): Promise<void>;
   incrementRate(ip: string, ttlSeconds: number): Promise<void>;
   clearRate(ip: string): Promise<void>;
+  putAudit(userId: string, event: string, details?: Record<string, unknown>): Promise<void>;
   putCipher(cipher: CipherItem): Promise<void>;
   getCipher(userId: string, cipherId: string): Promise<CipherItem | null>;
   listCiphers(userId: string): Promise<CipherItem[]>;
@@ -686,6 +701,22 @@ export class DynamoStore implements Store {
     await this.db.send(new DeleteCommand({
       TableName: this.table,
       Key: { pk: `RATE#${ip}`, sk: 'LOGIN' },
+    }));
+  }
+
+  async putAudit(userId: string, event: string, details?: Record<string, unknown>): Promise<void> {
+    const now = Math.floor(Date.now() / 1000);
+    await this.db.send(new PutCommand({
+      TableName: this.table,
+      Item: {
+        pk: `AUDIT#${userId}#${now}#${crypto.randomUUID()}`,
+        sk: 'AUDIT',
+        userId,
+        event,
+        details: details ? JSON.stringify(details) : null,
+        timestamp: Date.now(),
+        expiresAt: now + 30 * 24 * 3600, // TTL: DynamoDB reaps the trail
+      },
     }));
   }
 
@@ -1282,6 +1313,22 @@ export class MemoryStore implements Store {
 
   async clearRate(ip: string): Promise<void> {
     this.rates.delete(ip);
+  }
+
+  // In-memory audit trail, exposed for tests and the dev server.
+  readonly auditEntries: AuditItem[] = [];
+
+  async putAudit(userId: string, event: string, details?: Record<string, unknown>): Promise<void> {
+    const now = Math.floor(Date.now() / 1000);
+    this.auditEntries.push({
+      pk: `AUDIT#${userId}#${now}#${randomUUID()}`,
+      sk: 'AUDIT',
+      userId,
+      event,
+      details: details ? JSON.stringify(details) : null,
+      timestamp: Date.now(),
+      expiresAt: now + 30 * 24 * 3600,
+    });
   }
 
   async listCiphers(userId: string): Promise<CipherItem[]> {

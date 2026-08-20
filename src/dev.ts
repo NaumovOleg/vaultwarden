@@ -3,11 +3,17 @@
 //   npm run dev                 → in-memory store (resets on restart)
 //   VAULT_TABLE=... npm run dev → real DynamoDB dev table, no emulators
 import { createServer, IncomingMessage } from 'node:http';
+import { randomBytes } from 'node:crypto';
 import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 import { createHandler, defaultRoutes } from './handler';
 import { DynamoStore, MemoryStore } from './store';
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { extname, join, resolve } from 'node:path';
+
+// Dev-only signing key: store in the shell env for a stable key, fall back to
+// a random per-boot key (sessions die with the process; the prod Lambda
+// resolves JWT_SECRET from an SSM SecureString via JWT_SECRET_REF instead).
+process.env.JWT_SECRET ??= randomBytes(48).toString('base64url');
 
 const WEBVAULT_ROOT = resolve(__dirname, '../static/webvault');
 const MIME: Record<string, string> = {

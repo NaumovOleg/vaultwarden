@@ -175,8 +175,9 @@ password, which resets the grantor's).
 - **Budget**: `CostGuard` alerts at $1/month forecast — set
   `vaultwarden:alertEmail` in `cdk.json` or neither budget nor alarms are
   created (deploy-time warning).
-- **Logs**: Lambda logs to CloudWatch (`/aws/lambda/<name>`); 2FA email codes
-  and start-up lines are visible there.
+- **Logs**: Lambda logs to CloudWatch (`/aws/lambda/<name>`); requests and
+  high-level lifecycle lines only. 2FA codes, recovery codes, TOTP secrets and
+  JWT tokens are never logged (see [`docs/security-hardening.md`](docs/security-hardening.md)).
 
 ## Cost
 

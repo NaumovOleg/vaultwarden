@@ -1,4 +1,4 @@
-import { verifyClientHash } from '../auth';
+import { EMAIL_RE, verifyClientHash } from '../auth';
 import { recoveryCode, recoveryHash, totpCode, totpSecret, totpVerify } from '../crypto';
 import { BitwardenError } from '../errors';
 import type { RouteContext } from '../router';
@@ -87,6 +87,7 @@ export async function authenticatorEnable(params: Record<string, string>, ctx: R
     twoFactorEnabled: true,
   };
   await ctx.store.putUser(updated);
+  await ctx.store.putAudit(user.id, 'TFA_ENABLED', { provider: 'authenticator' });
   return json(200, {});
 }
 
@@ -102,6 +103,7 @@ export async function authenticatorDisable(params: Record<string, string>, ctx: 
     twoFactorEnabled: twoFactorEnabled(user) && !user.totpSecret,
   };
   await ctx.store.putUser(updated);
+  await ctx.store.putAudit(user.id, 'TFA_DISABLED', { provider: 'authenticator' });
   return json(200, {});
 }
 
@@ -132,6 +134,7 @@ export async function twoFactorDisable(params: Record<string, string>, ctx: Rout
       twoFactorEnabled: !!user.email2faEnabled,
     };
     await ctx.store.putUser(updated);
+    await ctx.store.putAudit(user.id, 'TFA_DISABLED', { provider: 'authenticator' });
     return json(200, {});
   }
   if (type === 1 && user.email2faEnabled) {
@@ -142,6 +145,7 @@ export async function twoFactorDisable(params: Record<string, string>, ctx: Rout
       twoFactorEnabled: !!user.totpSecret,
     };
     await ctx.store.putUser(updated);
+    await ctx.store.putAudit(user.id, 'TFA_DISABLED', { provider: 'email' });
     return json(200, {});
   }
   throw new BitwardenError(400, 'Two-step login provider not found.');
@@ -173,12 +177,12 @@ export async function getEmailSetup(params: Record<string, string>, ctx: RouteCo
 
 // POST /api/two-factor/send-email — setup code to the given address. With
 // SES the code goes by mail; without it the code is returned in the body for
-// the CLI/e2e flow (ponytail dev fallback).
+// the CLI/e2e flow (ponytail dev fallback). Never logged.
 export async function sendEmailSetup(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
   const user = ctx.user!;
   const body = ctx.bodyJson as Record<string, unknown>;
   const email = typeof body.email === 'string' ? body.email : '';
-  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+  if (!EMAIL_RE.test(email)) {
     throw new BitwardenError(400, 'Invalid email.');
   }
   const code = makeEmailCode();
@@ -189,11 +193,10 @@ export async function sendEmailSetup(params: Record<string, string>, ctx: RouteC
       return json(200, { email: maskEmail(email) });
     } catch (err) {
       // SES rejected (unverified recipient, quota). Fall through: the code
-      // goes in the response/logs instead of a dead-end 500.
+      // goes in the response so the flow survives (no mailer, no email).
       console.error(`[2fa] SES send failed for ${maskEmail(email)}`, err);
     }
   }
-  console.log(`[2fa] email code for ${user.id}: ${code}`);
   return json(200, { email: maskEmail(email), code });
 }
 
@@ -211,7 +214,7 @@ export async function sendEmailLogin(params: Record<string, string>, ctx: RouteC
   if (process.env.SES_SOURCE !== undefined && process.env.SES_SOURCE !== '') {
     // email2faAddress stores a masked display address only; the login form
     // resends the full address in the body.
-    if (/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    if (EMAIL_RE.test(email)) {
       try {
         await ctx.mailer.send(email, 'Your verification code', `Your vaultwarden email 2FA code is ${code}.`);
         return json(200, {});
@@ -222,7 +225,6 @@ export async function sendEmailLogin(params: Record<string, string>, ctx: RouteC
       throw new BitwardenError(400, 'Invalid email.');
     }
   }
-  console.log(`[2fa] email login code for ${user.id}: ${code}`);
   return json(200, {});
 }
 
@@ -233,7 +235,7 @@ export async function emailEnable(params: Record<string, string>, ctx: RouteCont
   requirePassword(body, user);
   const email = typeof body.email === 'string' ? body.email : '';
   const token = typeof body.token === 'string' ? body.token : String(body.token ?? '');
-  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || !/^\d{6}$/.test(token)) {
+  if (!EMAIL_RE.test(email) || !/^\d{6}$/.test(token)) {
     throw new BitwardenError(400, 'Invalid request.');
   }
   const stored = await ctx.store.getEmail2faCode(user.id);
@@ -248,6 +250,7 @@ export async function emailEnable(params: Record<string, string>, ctx: RouteCont
     twoFactorEnabled: true,
   };
   await ctx.store.putUser(updated);
+  await ctx.store.putAudit(user.id, 'TFA_ENABLED', { provider: 'email' });
   return json(200, {});
 }
 

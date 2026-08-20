@@ -133,6 +133,38 @@ import { authenticate } from './auth';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' };
 
+// Applied to every response (2xx/4xx/5xx, all endpoints) at the single
+// choke point below. The static web vault gets the same set from a
+// CloudFront response-headers policy (lib/vaultwarden-stack.ts).
+const SECURITY_HEADERS = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'X-XSS-Protection': '1; mode=block',
+  'Referrer-Policy': 'no-referrer',
+  'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+  'Content-Security-Policy': "default-src 'none'",
+};
+
+function withSecurityHeaders(res: APIGatewayProxyResult): APIGatewayProxyResult {
+  if (!res.headers) res.headers = {};
+  Object.assign(res.headers, SECURITY_HEADERS);
+  return res;
+}
+
+// Request body limits: 10MB file uploads (attachment/send file routes,
+// beneath the API Gateway 10MB hard cap), 1MB everything else (DDoS).
+const MAX_FILE_BODY_BYTES = 10 * 1024 * 1024;
+const MAX_API_BODY_BYTES = 1024 * 1024;
+
+function approximateBodyBytes(event: APIGatewayProxyEventV2): number {
+  const raw = event.body ?? '';
+  return event.isBase64Encoded ? Math.ceil((raw.length / 4) * 3) : Buffer.byteLength(raw);
+}
+
+function isFileUploadPath(path: string): boolean {
+  return /\/attachment(?:\/|$)/.test(path) || /\/api\/sends\/[^/]+\/file\//.test(path);
+}
+
 export interface Deps {
   store: Store;
   objects?: ObjectStore;
@@ -385,27 +417,32 @@ export function createHandler(routes: Route[], deps: Deps = defaultDeps) {
 
     let result: APIGatewayProxyResult;
     try {
-      const route = match(method, path, routes);
-      if (!route) {
-        result = json(notFound().status, toErrorBody(notFound()));
+      const bodyLimit = isFileUploadPath(path) ? MAX_FILE_BODY_BYTES : MAX_API_BODY_BYTES;
+      if (approximateBodyBytes(event) > bodyLimit) {
+        result = json(413, '{"Message":"Request body too large."}');
       } else {
-        const ctx: RouteContext = {
-          ...parseBody(event, deps.mailer ?? sesMailer),
-          store: deps.store,
-          objects: deps.objects ?? defaultObjects(),
-          icons: deps.icons ?? defaultIconsObjects(),
-        };
-        if (route.auth) {
-          const authn = await authenticate(deps.store, ctx);
-          if (!authn) {
-            result = { statusCode: 401, headers: JSON_HEADERS, body: '{"Message":"Unauthorized"}' };
+        const route = match(method, path, routes);
+        if (!route) {
+          result = json(notFound().status, toErrorBody(notFound()));
+        } else {
+          const ctx: RouteContext = {
+            ...parseBody(event, deps.mailer ?? sesMailer),
+            store: deps.store,
+            objects: deps.objects ?? defaultObjects(),
+            icons: deps.icons ?? defaultIconsObjects(),
+          };
+          if (route.auth) {
+            const authn = await authenticate(deps.store, ctx);
+            if (!authn) {
+              result = { statusCode: 401, headers: JSON_HEADERS, body: '{"Message":"Unauthorized"}' };
+            } else {
+              ctx.user = authn.user;
+              ctx.session = authn.session;
+              result = (await route.handler(route.params, ctx)) as APIGatewayProxyResult;
+            }
           } else {
-            ctx.user = authn.user;
-            ctx.session = authn.session;
             result = (await route.handler(route.params, ctx)) as APIGatewayProxyResult;
           }
-        } else {
-          result = (await route.handler(route.params, ctx)) as APIGatewayProxyResult;
         }
       }
     } catch (err) {
@@ -425,7 +462,7 @@ export function createHandler(routes: Route[], deps: Deps = defaultDeps) {
         status: result.statusCode,
       }),
     );
-    return result;
+    return withSecurityHeaders(result);
   };
 }
 

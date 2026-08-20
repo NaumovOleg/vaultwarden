@@ -423,6 +423,7 @@ export async function changePassword(params: Record<string, string>, ctx: RouteC
     revisionDateMs: Date.now(),
   };
   await ctx.store.putUser(updated);
+  await ctx.store.putAudit(user.id, 'PASSWORD_CHANGED', {});
   return jwtJson(200, {});
 }
 
@@ -474,6 +475,7 @@ export async function changeKdf(params: Record<string, string>, ctx: RouteContex
     revisionDateMs: Date.now(),
   };
   await ctx.store.putUser(updated);
+  await ctx.store.putAudit(user.id, 'KDF_CHANGED', {});
   return jwtJson(200, {});
 }
 
@@ -489,6 +491,7 @@ export async function rotateSecurityStamp(params: Record<string, string>, ctx: R
     revisionDateMs: Date.now(),
   };
   await ctx.store.putUser(updated);
+  await ctx.store.putAudit(user.id, 'LOGOUT_ALL', {});
   return jwtJson(200, {});
 }
 
@@ -509,6 +512,7 @@ export async function deleteAccount(params: Record<string, string>, ctx: RouteCo
     if (send.type === 1) await ctx.objects.deletePrefix(`sends/${send.id}/`);
   }
   await ctx.store.deleteUser(user.id);
+  await ctx.store.putAudit(user.id, 'ACCOUNT_DELETED', {});
   return jwtJson(200, {});
 }
 

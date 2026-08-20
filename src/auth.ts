@@ -11,6 +11,9 @@ export const EMAIL_LOCK_MAX = 5;
 export const EMAIL_LOCK_TTL_SECONDS = 600;
 export const TFA_TOKEN_TTL_SECONDS = 300;
 
+// RFC 5322-ish, deliberately loose: local part + @ + dotted domain.
+export const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
 export interface SessionPair {
   accessToken: string;
   refreshToken: string;
@@ -28,7 +31,7 @@ export async function issueSession(store: Store, user: UserItem, deviceId: strin
   // JwtTokenDataJson, which REQUIRES email_verified (Boolean) and amr
   // (List<String>) — a missing claim makes parseJwtTokenDataOrNull return
   // null and the app crashes with "Required value was null".
-  const accessToken = signJwt(
+  const accessToken = await signJwt(
     {
       sub: user.id,
       email: user.email,
@@ -40,7 +43,7 @@ export async function issueSession(store: Store, user: UserItem, deviceId: strin
     },
     ACCESS_TTL_SECONDS,
   );
-  const refreshToken = signJwt({ sub: user.id }, REFRESH_TTL_SECONDS);
+  const refreshToken = await signJwt({ sub: user.id }, REFRESH_TTL_SECONDS);
   const access: SessionItem = {
     pk: `SESS#${accessToken}`,
     sk: 'TOKEN',
@@ -130,4 +133,15 @@ export async function recordFailedLogin(store: Store, key: string, ttl = RATE_TT
 
 export async function clearFailedLogins(store: Store, key: string): Promise<void> {
   await store.clearRate(key);
+}
+
+// Fixed-window counter that increments THEN checks: for open endpoints where a
+// successful call must also count against the ceiling (register, verify-email),
+// unlike rateLimit which only reads the pump from recordFailedLogin.
+export async function consumeRate(store: Store, key: string, max: number, ttl: number): Promise<void> {
+  await store.incrementRate(key, ttl);
+  const rate = await store.getRate(key);
+  if (rate && rate.count > max) {
+    throw new BitwardenError(429, 'Too many requests. Try again later.');
+  }
 }

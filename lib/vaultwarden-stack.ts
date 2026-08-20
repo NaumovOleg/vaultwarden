@@ -5,6 +5,7 @@ import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import { CostGuard } from './constructs/cost-guard';
 
@@ -126,6 +127,16 @@ export class VaultwardenStack extends cdk.Stack {
       this.node.tryGetContext('vaultwarden:signupsAllowed') ?? 'false',
     );
 
+// JWT signing key: an SSM Parameter Store SecureString the Lambda
+// self-provisions on first use (src/crypto.ts ssmSecret) — no secrets in
+// source, no Secrets Manager. Rotate by overwriting the parameter; the
+// running instance picks it up on the next cold start.
+const jwtSecretParam = new ssm.StringParameter(this, 'JwtSecretParam', {
+  parameterName: `${this.stackName}-jwt-secret`,
+  stringValue: 'provisioned-by-lambda', // placeholder; the Lambda overwrites it
+  tier: ssm.ParameterTier.STANDARD,
+});
+
     this.handler = new lambda.NodejsFunction(this, 'Handler', {
       entry: 'src/handler.ts',
       runtime: cdk.aws_lambda.Runtime.NODEJS_22_X,
@@ -139,11 +150,19 @@ export class VaultwardenStack extends cdk.Stack {
         ATTACHMENTS_BUCKET: this.attachmentsBucket.bucketName,
         ICONS_BUCKET: this.iconsBucket.bucketName,
         SES_SOURCE: `no-reply@${vaultOrigin}`,
+        JWT_SECRET_REF: jwtSecretParam.parameterName,
       },
     });
     this.table.grantReadWriteData(this.handler);
     this.attachmentsBucket.grantReadWrite(this.handler);
     this.iconsBucket.grantReadWrite(this.handler);
+    jwtSecretParam.grantRead(this.handler);
+    this.handler.addToRolePolicy(
+      new cdk.aws_iam.PolicyStatement({
+        actions: ['ssm:PutParameter'],
+        resources: [jwtSecretParam.parameterArn],
+      }),
+    );
 
     // SES: send recovery emails from the vault domain. DKIM records are
     // published into the hosted zone manually (the CDK hostedZone path is
@@ -254,6 +273,32 @@ export class VaultwardenStack extends cdk.Stack {
     const domainNames = certificate ? [new URL(domain).hostname] : undefined;
 
     const apiOrigin = this.apiBehavior(this.api);
+    // Security headers for the static web vault (the API Lambda already sets
+    // the same set on every response, src/handler.ts SECURITY_HEADERS).
+    const securityHeaders = new cloudfront.ResponseHeadersPolicy(this, 'SecurityHeaders', {
+      securityHeadersBehavior: {
+        strictTransportSecurity: {
+          override: true,
+          accessControlMaxAge: cdk.Duration.days(365),
+          includeSubdomains: true,
+          preload: true,
+        },
+        contentTypeOptions: { override: true },
+        frameOptions: { override: true, frameOption: cloudfront.HeadersFrameOption.DENY },
+        referrerPolicy: { override: true, referrerPolicy: cloudfront.HeadersReferrerPolicy.NO_REFERRER },
+        contentSecurityPolicy: {
+          override: true,
+          // Same-origin policy for the SPA: it must keep loading its own
+          // scripts/styles and calling the same-origin API. The API Lambda's
+          // responses carry a stricter default-src 'none' (JSON has no
+          // document context).
+          contentSecurityPolicy:
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+            "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; " +
+            "worker-src 'self' blob:; base-uri 'self'; frame-ancestors 'none'",
+        },
+      },
+    });
     this.distribution = new cloudfront.Distribution(this, 'Distribution', {
       defaultRootObject: 'index.html',
       certificate,
@@ -261,6 +306,7 @@ export class VaultwardenStack extends cdk.Stack {
       defaultBehavior: {
         origin: origins.S3BucketOrigin.withOriginAccessControl(this.staticBucket),
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        responseHeadersPolicy: securityHeaders,
       },
       additionalBehaviors: {
         '/api/*': apiOrigin,

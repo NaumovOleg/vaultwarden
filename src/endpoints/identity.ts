@@ -1,11 +1,5 @@
 import { randomBytes, randomInt } from 'node:crypto';
-import {
-  clearFailedLogins,
-  issueSession,
-  rateLimit,
-  recordFailedLogin,
-  verifyClientHash,
-} from '../auth';
+import { clearFailedLogins, consumeRate, EMAIL_RE, issueSession, rateLimit, recordFailedLogin, verifyClientHash } from '../auth';
 import { newToken, newUuid, DEFAULT_KDF, hashPassword } from '../crypto';
 import { twoFactorChallenge, verifyTwoFactorCode } from './two-factor';
 import { badRequest, BitwardenError } from '../errors';
@@ -14,6 +8,13 @@ import type { VerifyTokenItem, DeviceItem, Store, UserItem } from '../store';
 import { TFA_TOKEN_TTL_SECONDS, EMAIL_LOCK_MAX, EMAIL_LOCK_TTL_SECONDS } from '../auth';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json; charset=utf-8' };
+
+// Per-IP ceilings for open (unauthenticated) endpoints; each key is a
+// separate DynamoDB RATE bucket. Email-lock buckets cover per-account abuse.
+export const REGISTER_PER_IP_MAX = 5;
+export const REGISTER_PER_IP_TTL_SECONDS = 3600;
+export const VERIFY_EMAIL_PER_IP_MAX = 10;
+export const VERIFY_EMAIL_PER_IP_TTL_SECONDS = 3600;
 
 function json(statusCode: number, body: unknown) {
   return { statusCode, headers: JSON_HEADERS, body: JSON.stringify(body) };
@@ -81,10 +82,11 @@ export async function sendVerificationEmail(params: Record<string, string>, ctx:
   if (process.env.SIGNUPS_ALLOWED !== 'true') {
     throw new BitwardenError(403, 'Registration is disabled.');
   }
+  await consumeRate(ctx.store, `verify:${ctx.sourceIp}`, VERIFY_EMAIL_PER_IP_MAX, VERIFY_EMAIL_PER_IP_TTL_SECONDS);
 
   const body = ctx.bodyJson as Record<string, unknown>;
   const email = String(body.email ?? '').trim().toLowerCase();
-  if (!email.includes('@')) {
+  if (!EMAIL_RE.test(email)) {
     throw badRequest('Invalid email address.');
   }
 
@@ -146,10 +148,11 @@ export async function register(params: Record<string, string>, ctx: RouteContext
   if (process.env.SIGNUPS_ALLOWED !== 'true') {
     throw new BitwardenError(403, 'Registration is disabled.');
   }
+  await consumeRate(ctx.store, `register:${ctx.sourceIp}`, REGISTER_PER_IP_MAX, REGISTER_PER_IP_TTL_SECONDS);
 
   const body = ctx.bodyJson;
   const email = String(body.email ?? ctx.bodyForm.get('email') ?? '').trim().toLowerCase();
-  if (!email.includes('@')) {
+  if (!EMAIL_RE.test(email)) {
     throw badRequest('Invalid email address.');
   }
 
@@ -521,6 +524,7 @@ async function passwordGrant(ctx: RouteContext, form: Map<string, string>): Prom
     // Same response whether the email is unknown or the password is wrong.
     await recordFailedLogin(ctx.store, ctx.sourceIp);
     if (username) await recordFailedLogin(ctx.store, `email:${username}`, EMAIL_LOCK_TTL_SECONDS);
+    await ctx.store.putAudit(username, 'LOGIN_FAILED', { ip: ctx.sourceIp });
     return INVALID_GRANT();
   }
   if (user.emailVerified === false) {
@@ -572,6 +576,7 @@ async function passwordGrant(ctx: RouteContext, form: Map<string, string>): Prom
       const code = form.get('twofactorcode') ?? ctx.headers['auth-2fa'] ?? '';
       const provider = Number(form.get('twofactorprovider') ?? 0);
       if (!code || !(await verifyTwoFactorCode(user, provider, code, ctx))) {
+        await ctx.store.putAudit(user.id, 'LOGIN_FAILED', { stage: '2fa' });
         return INVALID_GRANT_MIN();
       }
 
@@ -597,6 +602,7 @@ async function passwordGrant(ctx: RouteContext, form: Map<string, string>): Prom
 
   await upsertDevice(ctx.store, user, form, deviceId);
   const pair = await issueSession(ctx.store, user, deviceId);
+  await ctx.store.putAudit(user.id, 'LOGIN_SUCCESS', { deviceId });
   return authenticatedResponse(user, pair);
 }
 
@@ -646,6 +652,7 @@ export async function endsession(params: Record<string, string>, ctx: RouteConte
         await ctx.store.deleteSession(session.pairedRefresh);
       }
       await ctx.store.deleteSession(value);
+      await ctx.store.putAudit(session.userId, 'LOGOUT', { deviceId: session.deviceId });
     }
   }
   return json(200, {});
@@ -684,6 +691,7 @@ export async function sendRecoveryCode(ctx: RouteContext, twoFactorOnly: boolean
   const code = String(randomInt(0, 1_0000_0000)).padStart(8, '0');
   const expiresAt = Math.floor(Date.now() / 1000) + RECOVER_CODE_TTL_SECONDS;
   await ctx.store.putRecoverCode(user.id, code, expiresAt);
+  await ctx.store.putAudit(user.id, 'RECOVERY_EMAIL_SENT', {});
   try {
     await ctx.mailer.send(
       user.email,

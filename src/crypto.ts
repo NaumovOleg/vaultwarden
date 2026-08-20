@@ -1,4 +1,5 @@
 import * as crypto from 'node:crypto';
+import { GetParameterCommand, PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 
 export const DEFAULT_KDF = {
   kdfType: 0, // PBKDF2-SHA256
@@ -13,15 +14,56 @@ export function newToken(): string {
 
 // HS256 JWT for access/refresh tokens: the 2026 clients' SDK decodes the
 // access token payload (sub = userId). The server never verifies the
-// signature — sessions are looked up by the raw token string in the store —
-// but the token must look like a real JWT.
-export function signJwt(claims: Record<string, unknown>, ttlSeconds: number): string {
+// signature — sessions are looked up by the raw token string in the store
+// (a forged token has no session row; the secret only authenticates tokens
+// to clients) — but the token must look like a real JWT.
+//
+// No hardcoded fallback: JWT_SECRET is mandatory. Prefer the env var (set
+// locally); JWT_SECRET_REF names a SSM Parameter Store SecureString that the
+// Lambda resolves on first use. If the parameter does not exist yet, the
+// Lambda generates a secret and writes it (self-provisioning; rotate by
+// overwriting the parameter — the running instance picks it up on the next
+// cold start).
+let jwtSecretPromise: Promise<string> | null = null;
+
+async function ssmSecret(): Promise<string> {
+  const client = new SSMClient({});
+  const ref = process.env.JWT_SECRET_REF;
+  if (!ref) throw new Error('JWT_SECRET is not set; refusing to sign tokens.');
+  async function get(): Promise<string | null> {
+    const res = await client.send(new GetParameterCommand({ Name: ref, WithDecryption: true }));
+    return res.Parameter?.Value ?? null;
+  }
+  const existing = await get();
+  if (existing) return existing;
+  try {
+    await client.send(new PutParameterCommand({
+      Name: ref,
+      Type: 'SecureString',
+      Value: newToken(),
+      Overwrite: false,
+    }));
+  } catch {
+    // ParameterNotFound race (two cold starts): whoever wrote it first wins.
+  }
+  const value = await get();
+  if (!value) throw new Error(`JWT_SECRET_REF ${ref} could not be provisioned or read.`);
+  return value;
+}
+
+export async function jwtSecret(): Promise<string> {
+  if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
+  if (!jwtSecretPromise) jwtSecretPromise = ssmSecret();
+  return jwtSecretPromise;
+}
+
+export async function signJwt(claims: Record<string, unknown>, ttlSeconds: number): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
   const payload = Buffer.from(
     JSON.stringify({ ...claims, jti: newToken(), iat: now, nbf: now, exp: now + ttlSeconds }),
   ).toString('base64url');
-  const secret = process.env.JWT_SECRET ?? 'vaultwarden-cdk-dev-secret';
+  const secret = await jwtSecret();
   const sig = crypto.createHmac('sha256', secret).update(`${header}.${payload}`).digest('base64url');
   return `${header}.${payload}.${sig}`;
 }
