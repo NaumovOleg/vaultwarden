@@ -8,6 +8,7 @@ import { changeEmail, verifyEmail, verifyPassword } from '../src/endpoints/accou
 
 const routes: Route[] = [
   { method: 'POST', pattern: '/identity/accounts/register', handler: (p, ctx) => register(p, ctx) },
+  { method: 'POST', pattern: '/identity/accounts/register/finish', handler: (p, ctx) => register(p, ctx) },
   { method: 'POST', pattern: '/identity/accounts/register/send-verification-email', handler: (p, ctx) => sendVerificationEmail(p, ctx) },
   { method: 'POST', pattern: '/identity/connect/token', handler: (p, ctx) => token(p, ctx) },
   { method: 'POST', pattern: '/api/accounts/email', handler: (p, ctx) => changeEmail(p, ctx), auth: true },
@@ -93,7 +94,7 @@ function lastSendBody(send: ReturnType<typeof makeEnv>['send']): string {
 
 async function registerVerified(env: ReturnType<typeof makeEnv>, email: string) {
   const pre = await env.handler(apiEvent('POST', '/identity/accounts/register/send-verification-email', { email }));
-  expect(pre.statusCode).toBe(200);
+  expect(pre.statusCode).toBe(204);
   const token = /emailVerificationToken=([A-Za-z0-9_-]+)/.exec(lastSendBody(env.send))?.[1];
   expect(token).toBeTruthy();
   const reg = await env.handler(
@@ -136,19 +137,24 @@ describe('email verification + change', () => {
     // send-verification-email mails a finish-signup link with a single-use
     // token that registers a second account.
     const pre = await env.handler(apiEvent('POST', '/identity/accounts/register/send-verification-email', { email: OTHER_EMAIL }));
-    expect(pre.statusCode).toBe(200);
+    expect(pre.statusCode).toBe(204);
     const token = /emailVerificationToken=([A-Za-z0-9_-]+)/.exec(lastSendBody(env.send))?.[1];
     expect(token).toBeTruthy();
     const second = await env.handler(
-      apiEvent('POST', '/identity/accounts/register', {
+      apiEvent('POST', '/identity/accounts/register/finish', {
         email: OTHER_EMAIL,
         emailVerificationToken: token,
-        masterPasswordAuthentication: { hash: PASSWORD },
-        key: 'akey',
-        keys: { publicKey: 'pub', privateKey: 'priv' },
+        masterPasswordHash: PASSWORD,
+        userSymmetricKey: 'usymkey',
+        userAsymmetricKeys: { publicKey: 'pub', encryptedPrivateKey: 'priv' },
+        kdf: 0,
+        kdfIterations: 600000,
       }),
     );
     expect(second.statusCode).toBe(200);
+    const created = await env.store.getUserByEmail(OTHER_EMAIL);
+    expect(created!.akey).toBe('usymkey');
+    expect(created!.emailVerified).toBe(true);
   });
 
   it('changes email only after the new address confirms its link', async () => {

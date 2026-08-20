@@ -78,6 +78,12 @@ function mailerAvailable(ctx: RouteContext): boolean {
   return process.env.SES_SOURCE !== undefined && process.env.SES_SOURCE !== '';
 }
 
+// 204 No Content is the Bitwarden/vaultwarden contract here: the Android app
+// parses this response body as a JsonPrimitive (emailVerificationToken or
+// nothing) and a JSON object like {} crashes its deserializer. 204 also maps
+// to "check your email" in the web vault, same as {} did.
+const NO_CONTENT = { statusCode: 204, headers: JSON_HEADERS, body: '' };
+
 export async function sendVerificationEmail(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
   if (process.env.SIGNUPS_ALLOWED !== 'true') {
     throw new BitwardenError(403, 'Registration is disabled.');
@@ -116,19 +122,19 @@ export async function sendVerificationEmail(params: Record<string, string>, ctx:
           'Verify your email',
           `Confirm your email: ${originUrl(ctx)}/verify-email.html?userId=${existing.id}&token=${token}`,
         );
-        return json(200, {});
+        return NO_CONTENT;
       } catch (err) {
         // SES sandbox rejects unverified recipients (or any send failure) —
         // never block signup on it, fall through to the no-mailer response.
         console.error('sendVerificationEmail: SES send failed, falling back', err);
       }
     }
-    return json(200, '');
+    return json(200, token);
   }
 
   await ctx.store.putVerifyToken(item);
   // Client branches on the body being a string: string → finish-signup with
-  // the token, anything else → "check your email" screen.
+  // the token, anything else (204) → "check your email" screen.
   if (mailerAvailable(ctx)) {
     try {
       await ctx.mailer.send(
@@ -136,7 +142,7 @@ export async function sendVerificationEmail(params: Record<string, string>, ctx:
         'Finish creating your account',
         `Finish creating your account: ${originUrl(ctx)}/#/finish-signup?email=${encodeURIComponent(email)}&token=${token}&emailVerificationToken=${token}&fromEmail=true`,
       );
-      return json(200, {});
+      return NO_CONTENT;
     } catch (err) {
       console.error('sendVerificationEmail: SES send failed, falling back', err);
     }
@@ -269,8 +275,13 @@ export async function register(params: Record<string, string>, ctx: RouteContext
     kdfParallelism: kdf.parallelism,
     securityStamp: newUuid(),
     // New clients skip the legacy `key` field; the wrapped user key (which
-    // they do send) doubles as the account key, like vaultwarden.
-    akey: String(body.key ?? '') || unlockWrappedKey || '',
+    // they do send) doubles as the account key, like vaultwarden. Android's
+    // register/finish sends it as userSymmetricKey.
+    akey:
+      String(body.key ?? '') ||
+      String(body.userSymmetricKey ?? '') ||
+      unlockWrappedKey ||
+      '',
     privateKey:
       typeof keys.privateKey === 'string'
         ? keys.privateKey
