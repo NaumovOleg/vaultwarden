@@ -162,6 +162,84 @@ describe('cipher CRUD', () => {
     expect(JSON.parse(r.body as string).name).toBe('example.com');
   });
 
+  it('create with nested cipher body — capitalized Android keys (Cipher/CollectionIds) keeps the cipher', async () => {
+    const env = makeEnv();
+    const at = await seed(env, 'nested@example.com');
+    const body = { Cipher: { ...LOGIN_CIPHER, name: 'nested-name' }, CollectionIds: [] };
+    const r = await env.handler(ev('POST', '/api/ciphers/create', JSON.stringify(body), at));
+    expect(r.statusCode).toBe(200);
+    const parsed = JSON.parse(r.body as string);
+    expect(parsed.name).toBe('nested-name');
+    expect(parsed.type).toBe(1);
+    expect(parsed.login.username).toBe('alice@example.com');
+    const list = JSON.parse((await env.handler(ev('GET', '/api/ciphers', '', at))).body as string);
+    expect(list.data).toHaveLength(1);
+    expect(list.data[0].name).toBe('nested-name');
+  });
+
+  it('create with nested lowercase cipher key still works', async () => {
+    const env = makeEnv();
+    const at = await seed(env, 'nested2@example.com');
+    const body = { cipher: { ...LOGIN_CIPHER, name: 'nested-lower' }, collectionIds: [] };
+    const r = await env.handler(ev('POST', '/api/ciphers/create', JSON.stringify(body), at));
+    expect(r.statusCode).toBe(200);
+    expect(JSON.parse(r.body as string).name).toBe('nested-lower');
+  });
+
+  it('accepts empty/garbage payloads (200) but never serves type-0 rows to sync/list', async () => {
+    const env = makeEnv();
+    const at = await seed(env, 'type0@example.com');
+    const r = await env.handler(ev('POST', '/api/ciphers/create', JSON.stringify({ cipher: {}, collectionIds: [] }), at));
+    expect(r.statusCode).toBe(200);
+    const r2 = await env.handler(ev('POST', '/api/ciphers', JSON.stringify({ type: 0, name: '' }), at));
+    expect(r2.statusCode).toBe(200);
+    const sync = JSON.parse((await env.handler(ev('GET', '/api/sync', '', at))).body as string);
+    expect(sync.ciphers).toHaveLength(0);
+    const list = JSON.parse((await env.handler(ev('GET', '/api/ciphers', '', at))).body as string);
+    expect(list.data).toHaveLength(0);
+  });
+
+  it('sync and list filter out legacy type-0 rows', async () => {
+    const env = makeEnv();
+    const at = await seed(env, 'filter0@example.com');
+    const userId = (await env.store.getUserByEmail('filter0@example.com'))!.id;
+    const now = new Date().toISOString();
+    await env.store.putCipher({
+      pk: `CIPHER#${userId}#legacy-blank`,
+      sk: 'CIPHER',
+      id: 'legacy-blank',
+      owner: userId,
+      type: 0,
+      name: '',
+      notes: null,
+      favorite: false,
+      reprompt: 0,
+      folderId: null,
+      organizationId: null,
+      collectionIds: [],
+      creationDate: now,
+      revisionDate: now,
+      deletedDate: null,
+      archivedDate: null,
+      key: null,
+      login: null,
+      secureNote: null,
+      card: null,
+      identity: null,
+      sshKey: null,
+      bankAccount: null,
+      driversLicense: null,
+      passport: null,
+      fields: null,
+      passwordHistory: null,
+      attachments: null,
+    } as any);
+    const sync = JSON.parse((await env.handler(ev('GET', '/api/sync', '', at))).body as string);
+    expect(sync.ciphers.filter((c: any) => c.id === 'legacy-blank')).toHaveLength(0);
+    const list = JSON.parse((await env.handler(ev('GET', '/api/ciphers', '', at))).body as string);
+    expect(list.data.filter((c: any) => c.id === 'legacy-blank')).toHaveLength(0);
+  });
+
   it('creates all four core types with the right type payload', async () => {
     const env = makeEnv();
     const at = await seed(env, 'types@example.com');

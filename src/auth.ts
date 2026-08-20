@@ -73,11 +73,13 @@ export async function issueSession(store: Store, user: UserItem, deviceId: strin
   };
 }
 
-// Validates an access token: exists, type access, user exists, stamp matches.
-// A stamp mismatch kills the session (revocation). Returns the session or null.
+// Validates an access token: exists, type access, unexpired, user exists,
+// stamp matches. A stamp mismatch kills the session (revocation). Returns the
+// session or null.
 export async function verifyAccessToken(store: Store, token: string): Promise<SessionItem | null> {
   const session = await store.getSession(token);
   if (!session || session.type !== 'access') return null;
+  if (typeof session.expiresAt === 'number' && session.expiresAt < Math.floor(Date.now() / 1000)) return null;
   const user = await store.getUser(session.userId);
   if (!user || user.securityStamp !== session.stamp) {
     await store.deleteSession(token);

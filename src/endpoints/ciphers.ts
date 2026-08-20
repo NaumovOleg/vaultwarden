@@ -176,10 +176,13 @@ function normalizeCreate(body: Record<string, any>): Omit<CipherItem, 'pk' | 'sk
   };
 }
 
-// GET /api/ciphers — non-deleted only
+// GET /api/ciphers — non-deleted only. Type-0 rows (early create bug) are
+// filtered out: the Android parser hard-crashes on CipherTypeJson value 0.
 export async function cipherList(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
   const all = await ctx.store.listCiphersForUser(ctx.user!.id);
-  const data = await Promise.all(all.filter((c) => c.deletedDate === null).map((c) => cipherJson(c, 'cipherDetails', ctx.objects)));
+  const data = await Promise.all(
+    all.filter((c) => c.deletedDate === null && c.type !== 0).map((c) => cipherJson(c, 'cipherDetails', ctx.objects)),
+  );
   return json(200, { object: 'list', data, continuationToken: null });
 }
 
@@ -189,10 +192,22 @@ export async function cipherGet(params: Record<string, string>, ctx: RouteContex
   return json(200, await cipherJson(item, 'cipherDetails', ctx.objects));
 }
 
-// POST /api/ciphers + /api/ciphers/create
+// POST /api/ciphers + /api/ciphers/create. Mobile clients wrap the new cipher
+// under a `cipher` key (any casing — this Android build sends `Cipher`/
+// `CollectionIds`) plus a collectionIds pair; the plain route sends it at the
+// top level. Unwrap case-insensitively so a wrapped payload never falls
+// through to an empty type-0 cipher, which crashes the Android sync parser
+// with "Unknown value 0 for CipherTypeJson".
 export async function cipherCreate(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
   const now = new Date().toISOString();
-  const content = normalizeCreate(ctx.bodyJson);
+  const raw: Record<string, unknown> = ctx.bodyJson;
+  const wrapKey = Object.keys(raw).find((k) => k.toLowerCase() === 'cipher');
+  const content = normalizeCreate(
+    wrapKey && typeof raw[wrapKey] === 'object' ? (raw[wrapKey] as Record<string, unknown>) : raw,
+  );
+  // Store whatever the client sent (empty payloads included — a 400 here
+  // surfaced as a raw save error on the mobile app). Type-0/garbage rows are
+  // kept out of sync/list so the Android parser never sees CipherTypeJson 0.
   const id = newUuid();
   const item: CipherItem = {
     ...content,

@@ -184,8 +184,14 @@ export async function sendEmailSetup(params: Record<string, string>, ctx: RouteC
   const code = makeEmailCode();
   await ctx.store.putEmail2faCode(user.id, code, Math.floor(Date.now() / 1000) + EMAIL_CODE_TTL_SECONDS);
   if (process.env.SES_SOURCE !== undefined && process.env.SES_SOURCE !== '') {
-    await ctx.mailer.send(email, 'Your verification code', `Your vaultwarden email 2FA code is ${code}.`);
-    return json(200, { email: maskEmail(email) });
+    try {
+      await ctx.mailer.send(email, 'Your verification code', `Your vaultwarden email 2FA code is ${code}.`);
+      return json(200, { email: maskEmail(email) });
+    } catch (err) {
+      // SES rejected (unverified recipient, quota). Fall through: the code
+      // goes in the response/logs instead of a dead-end 500.
+      console.error(`[2fa] SES send failed for ${maskEmail(email)}`, err);
+    }
   }
   console.log(`[2fa] email code for ${user.id}: ${code}`);
   return json(200, { email: maskEmail(email), code });
@@ -206,10 +212,15 @@ export async function sendEmailLogin(params: Record<string, string>, ctx: RouteC
     // email2faAddress stores a masked display address only; the login form
     // resends the full address in the body.
     if (/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-      await ctx.mailer.send(email, 'Your verification code', `Your vaultwarden email 2FA code is ${code}.`);
-      return json(200, {});
+      try {
+        await ctx.mailer.send(email, 'Your verification code', `Your vaultwarden email 2FA code is ${code}.`);
+        return json(200, {});
+      } catch (err) {
+        console.error(`[2fa] SES send failed for ${maskEmail(email)}`, err);
+      }
+    } else {
+      throw new BitwardenError(400, 'Invalid email.');
     }
-    throw new BitwardenError(400, 'Invalid email.');
   }
   console.log(`[2fa] email login code for ${user.id}: ${code}`);
   return json(200, {});

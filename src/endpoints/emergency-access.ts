@@ -265,7 +265,9 @@ export async function eaView(params: Record<string, string>, ctx: RouteContext):
   }
   const ciphers = await ctx.store.listCiphersForUser(grantor.id);
   return json(200, {
-    ciphers: await Promise.all(ciphers.map((c) => cipherJson(c, 'cipherDetails', ctx.objects))),
+    ciphers: await Promise.all(
+      ciphers.filter((c) => c.type !== 0).map((c) => cipherJson(c, 'cipherDetails', ctx.objects)),
+    ),
     folders: (await ctx.store.listFolders(grantor.id)).map(folderJson),
     collections: (await ctx.store.listCollectionsForUser(grantor.id)).map((c) => collectionJson(c)),
     organizations: orgsJson,

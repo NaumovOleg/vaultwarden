@@ -58,6 +58,24 @@ export async function deviceById(params: Record<string, string>, ctx: RouteConte
   return json(200, deviceJson(device, ctx.user!.id));
 }
 
+// GET /api/devices/knowndevice — unauthenticated probe from the mobile
+// device-trust flow; email comes base64url-encoded in X-Request-Email, the
+// device id in X-Device-Identifier. Raw JSON boolean, mirrors Bitwarden.
+export async function knownDevice(params: Record<string, string>, ctx: RouteContext): Promise<unknown> {
+  const emailHeader = String(ctx.headers['x-request-email'] ?? '');
+  const deviceId = String(ctx.headers['x-device-identifier'] ?? '');
+  if (!emailHeader || !deviceId) return json(200, false);
+  let email: string;
+  try {
+    email = Buffer.from(emailHeader, 'base64url').toString('utf8').trim().toLowerCase();
+  } catch {
+    return json(200, false);
+  }
+  const user = await ctx.store.getUserByEmail(email);
+  const device = user ? await ctx.store.getDevice(user.id, deviceId) : null;
+  return json(200, !!device);
+}
+
 // PUT|POST /api/devices/identifier/{deviceId}/token
 export async function deviceRegisterToken(
   params: Record<string, string>,

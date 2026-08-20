@@ -2,11 +2,12 @@ import type { APIGatewayProxyEventV2 } from 'aws-lambda';
 import { createHandler } from '../src/handler';
 import type { Route } from '../src/router';
 import { MemoryStore } from '../src/store';
-import { deviceList, deviceCreate, deviceById, deviceRegisterToken, deviceClearToken } from '../src/endpoints/devices';
+import { deviceList, deviceCreate, deviceById, deviceRegisterToken, deviceClearToken, knownDevice } from '../src/endpoints/devices';
 
 const routes: Route[] = [
   { method: 'GET', pattern: '/api/devices', handler: deviceList, auth: true },
   { method: 'POST', pattern: '/api/devices', handler: deviceCreate, auth: true },
+  { method: 'GET', pattern: '/api/devices/knowndevice', handler: knownDevice },
   { method: 'GET', pattern: '/api/devices/identifier/:deviceId', handler: deviceById, auth: true },
   { method: 'PUT', pattern: '/api/devices/identifier/:deviceId/token', handler: deviceRegisterToken, auth: true },
   { method: 'POST', pattern: '/api/devices/identifier/:deviceId/token', handler: deviceRegisterToken, auth: true },
@@ -28,10 +29,11 @@ function makeEnv() {
   return { store, handler: createHandler(routes, { store }) };
 }
 
-function ev(method: string, rawPath: string, body = '', token?: string, contentType?: string): APIGatewayProxyEventV2 {
+function ev(method: string, rawPath: string, body = '', token?: string, contentType?: string, extraHeaders?: Record<string, string>): APIGatewayProxyEventV2 {
   const headers: Record<string, string> = {};
   if (token) headers['authorization'] = `Bearer ${token}`;
   if (body) headers['content-type'] = contentType ?? 'application/json';
+  Object.assign(headers, extraHeaders);
   return {
     rawPath,
     body,
@@ -251,5 +253,30 @@ describe('devices endpoints', () => {
     });
     const r = await env.handler(ev('GET', '/api/devices', '', accessToken));
     expect(JSON.parse(r.body as string).data).toHaveLength(1);
+  });
+
+  it('knowndevice probe: unauthenticated, base64url email header, raw boolean', async () => {
+    const env = makeEnv();
+    await seedUserAndToken(env, 'known@example.com');
+    const email64 = Buffer.from('known@example.com').toString('base64url');
+
+    const headers = (email64: string, deviceId: string) => ({
+      'x-request-email': email64,
+      'x-device-identifier': deviceId,
+    });
+
+    const known = await env.handler(ev('GET', '/api/devices/knowndevice', '', undefined, undefined, headers(email64, 'dev-seed')));
+    expect(known.statusCode).toBe(200);
+    expect(JSON.parse(known.body as string)).toBe(true);
+
+    const otherDevice = await env.handler(ev('GET', '/api/devices/knowndevice', '', undefined, undefined, headers(email64, 'other-dev')));
+    expect(JSON.parse(otherDevice.body as string)).toBe(false);
+
+    const unknownEmail = await env.handler(ev('GET', '/api/devices/knowndevice', '', undefined, undefined, headers(Buffer.from('nobody@example.com').toString('base64url'), 'dev-seed')));
+    expect(JSON.parse(unknownEmail.body as string)).toBe(false);
+
+    const noHeaders = await env.handler(ev('GET', '/api/devices/knowndevice'));
+    expect(noHeaders.statusCode).toBe(200);
+    expect(JSON.parse(noHeaders.body as string)).toBe(false);
   });
 });

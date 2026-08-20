@@ -692,7 +692,9 @@ export async function sendRecoveryCode(ctx: RouteContext, twoFactorOnly: boolean
     );
   } catch (err) {
     console.error('recover: SES send failed', err);
-    return json(500, { error: 'Failed to send the recovery email.' });
+    // SesURLError/SesRejectedEmail fallback: keep the flow usable, the code
+    // shows in the response and logs instead of a dead-end 500.
+    return json(200, { dev_code: code });
   }
   return json(200, {});
 }

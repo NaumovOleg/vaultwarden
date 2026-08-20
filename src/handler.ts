@@ -1,7 +1,7 @@
 import type { APIGatewayProxyEventV2, APIGatewayProxyResult } from 'aws-lambda';
 import { config, alive, now, version, domainsGet, domainsPut, hibpBreach } from './endpoints/misc';
 import { register, sendVerificationEmail, prelogin, token, endsession, recoverPassword, recoverTwoFactor } from './endpoints/identity';
-import { deviceList, deviceCreate, deviceById, deviceRegisterToken, deviceClearToken } from './endpoints/devices';
+import { deviceList, deviceCreate, deviceById, deviceRegisterToken, deviceClearToken, knownDevice } from './endpoints/devices';
 import {
   profile,
   revisionDate,
@@ -178,6 +178,7 @@ export const defaultRoutes: Route[] = [
   { method: 'POST', pattern: '/identity/connect/endsession', handler: endsession },
   { method: 'GET', pattern: '/api/devices', handler: deviceList, auth: true },
   { method: 'POST', pattern: '/api/devices', handler: deviceCreate, auth: true },
+  { method: 'GET', pattern: '/api/devices/knowndevice', handler: knownDevice },
   { method: 'GET', pattern: '/api/devices/identifier/:deviceId', handler: deviceById, auth: true },
   { method: 'PUT', pattern: '/api/devices/identifier/:deviceId/token', handler: deviceRegisterToken, auth: true },
   { method: 'POST', pattern: '/api/devices/identifier/:deviceId/token', handler: deviceRegisterToken, auth: true },

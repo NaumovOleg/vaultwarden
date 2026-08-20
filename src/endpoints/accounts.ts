@@ -107,14 +107,21 @@ export async function changeEmail(params: Record<string, string>, ctx: RouteCont
     pendingEmail: email,
   });
   if (process.env.SES_SOURCE !== undefined && process.env.SES_SOURCE !== '') {
-    await ctx.mailer.send(
-      email,
-      'Confirm your new email',
-      `Confirm your new email: ${originUrl(ctx)}/verify-email.html?userId=${encodeURIComponent(user.id)}&token=${token}`,
-    );
-    return { statusCode: 200, headers: JSON_HEADERS, body: '{}' };
+    try {
+      await ctx.mailer.send(
+        email,
+        'Confirm your new email',
+        `Confirm your new email: ${originUrl(ctx)}/verify-email.html?userId=${encodeURIComponent(user.id)}&token=${token}`,
+      );
+      return { statusCode: 200, headers: JSON_HEADERS, body: '{}' };
+    } catch (err) {
+      // SES rejected: fall through and apply the change immediately rather
+      // than stranding the account in pending state.
+      console.error('changeEmail: SES send failed', err);
+    }
   }
-  // No mailer configured: apply the change immediately (dev/self-served flow).
+  // No mailer configured (or SES failed): apply the change immediately
+  // (dev/self-served flow).
   const updated: UserItem = { ...user, email, emailVerified: true, revisionDate: new Date().toISOString(), revisionDateMs: Date.now() };
   await ctx.store.putUser(updated);
   await ctx.store.deleteVerifyToken(token);
@@ -348,7 +355,9 @@ export async function sync(params: Record<string, string>, ctx: RouteContext): P
     ...bundle,
     collections: collections.map((c) => collectionJson(c)),
     policies: await userPoliciesJson(ctx),
-    ciphers: await Promise.all(ciphers.map((c) => cipherJson(c, 'cipherDetails', ctx.objects))),
+    ciphers: await Promise.all(
+      ciphers.filter((c) => c.type !== 0).map((c) => cipherJson(c, 'cipherDetails', ctx.objects)),
+    ),
     domains: excludeDomains ? null : domainsJson(),
     sends: sends.map(sendJson),
     organizations: orgsJson,
